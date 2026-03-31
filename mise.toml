@@ -1,0 +1,16 @@
+[tools]
+zig = "0.15.2"
+
+[tasks.build]
+description = "build"
+run = "zig build --summary all"
+
+[tasks.test]
+description = "test"
+run = "zig build test --summary all"
+
+[tasks.run]
+description = "run"
+run = "zig build run --summary all"
+
+
