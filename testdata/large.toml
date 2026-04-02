@@ -1,0 +1,213 @@
+# Benchmark test data for ztoml
+# This file is used to measure parse performance.
+
+title = "ztoml benchmark"
+version = "1.0.0"
+description = "A comprehensive TOML benchmark file with various value types"
+
+[server]
+host = "localhost"
+port = 8080
+debug = false
+max_connections = 1000
+timeout_ms = 30000
+read_timeout_ms = 5000
+write_timeout_ms = 5000
+idle_timeout_ms = 60000
+
+[database]
+host = "db.example.com"
+port = 5432
+name = "mydb"
+user = "admin"
+password = "s3cr3t"
+pool_size = 10
+max_idle = 5
+connect_timeout = 10
+max_lifetime_ms = 3600000
+
+[database.replica]
+host = "replica.example.com"
+port = 5432
+pool_size = 5
+
+[logging]
+level = "info"
+format = "json"
+output = "stdout"
+file = "/var/log/app.log"
+max_size_mb = 100
+max_backups = 7
+max_age_days = 30
+compress = true
+
+[cache]
+enabled = true
+host = "cache.example.com"
+port = 6379
+db = 0
+password = ""
+pool_size = 5
+ttl_seconds = 3600
+max_memory_mb = 512
+
+[auth]
+secret = "my-very-long-secret-key-for-jwt-signing"
+expiry_hours = 24
+refresh_expiry_hours = 168
+algorithm = "HS256"
+issuer = "myapp"
+
+[auth.providers]
+google_client_id = "google-client-id.apps.googleusercontent.com"
+github_client_id = "github-client-id"
+
+[features]
+enable_analytics = true
+enable_notifications = true
+enable_beta = false
+enable_dark_mode = true
+maintenance_mode = false
+rate_limiting = true
+max_requests_per_minute = 100
+
+[metrics]
+enabled = true
+host = "metrics.example.com"
+port = 9090
+path = "/metrics"
+interval_seconds = 15
+
+[[users]]
+id = 1
+name = "Alice"
+email = "alice@example.com"
+role = "admin"
+active = true
+score = 9.8
+
+[[users]]
+id = 2
+name = "Bob"
+email = "bob@example.com"
+role = "user"
+active = true
+score = 7.5
+
+[[users]]
+id = 3
+name = "Carol"
+email = "carol@example.com"
+role = "moderator"
+active = false
+score = 8.2
+
+[[users]]
+id = 4
+name = "Dave"
+email = "dave@example.com"
+role = "user"
+active = true
+score = 6.1
+
+[[users]]
+id = 5
+name = "Eve"
+email = "eve@example.com"
+role = "user"
+active = true
+score = 7.9
+
+[[products]]
+id = 101
+name = "Widget Pro"
+price = 29.99
+stock = 150
+category = "hardware"
+tags = ["widget", "pro", "hardware"]
+
+[[products]]
+id = 102
+name = "Gadget Plus"
+price = 49.99
+stock = 75
+category = "electronics"
+tags = ["gadget", "electronics", "plus"]
+
+[[products]]
+id = 103
+name = "Doohickey Deluxe"
+price = 14.99
+stock = 300
+category = "accessories"
+tags = ["doohickey", "deluxe", "accessories"]
+
+[[products]]
+id = 104
+name = "Thingamajig Standard"
+price = 9.99
+stock = 500
+category = "accessories"
+tags = ["thingamajig", "standard"]
+
+[[products]]
+id = 105
+name = "Whatchamacallit Ultra"
+price = 99.99
+stock = 25
+category = "premium"
+tags = ["premium", "ultra", "whatchamacallit"]
+
+[network]
+bind_address = "0.0.0.0"
+port = 3000
+tls_enabled = false
+cert_file = "/etc/ssl/certs/app.crt"
+key_file = "/etc/ssl/private/app.key"
+allowed_origins = ["https://example.com", "https://www.example.com", "https://api.example.com"]
+trusted_proxies = ["10.0.0.1", "10.0.0.2", "10.0.0.3"]
+
+[i18n]
+default_locale = "en"
+supported_locales = ["en", "ja", "fr", "de", "es", "zh", "ko"]
+fallback_locale = "en"
+timezone = "UTC"
+
+[storage]
+type = "s3"
+bucket = "my-app-bucket"
+region = "us-east-1"
+prefix = "data/"
+max_upload_size_mb = 100
+allowed_types = ["image/jpeg", "image/png", "image/gif", "application/pdf"]
+
+[email]
+smtp_host = "smtp.example.com"
+smtp_port = 587
+smtp_user = "noreply@example.com"
+smtp_password = "email-password"
+from_name = "My App"
+from_address = "noreply@example.com"
+use_tls = true
+
+[notifications]
+slack_webhook = "https://hooks.slack.com/services/XXX/YYY/ZZZ"
+pagerduty_key = "pd-integration-key"
+email_on_error = true
+error_threshold = 5
+cooldown_minutes = 30
+
+[rate_limits]
+global_rps = 1000
+per_user_rps = 10
+per_ip_rps = 50
+burst_size = 100
+window_seconds = 60
+
+[health_check]
+enabled = true
+path = "/health"
+interval_seconds = 30
+timeout_seconds = 5
+unhealthy_threshold = 3
+healthy_threshold = 2

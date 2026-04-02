@@ -13,4 +13,8 @@ run = "zig build test --summary all"
 description = "run"
 run = "zig build run --summary all"
 
+[tasks.bench]
+description = "bench"
+run = "zig build bench --summary all"
+
 
