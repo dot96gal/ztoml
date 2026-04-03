@@ -666,12 +666,11 @@ const Parser = struct {
 
     fn isTimeLike(self: *Parser) bool {
         const r = self.input[self.pos..];
-        if (r.len < 8) return false;
+        // HH:MM is the minimum (TOML v1.1.0 allows omitting seconds)
+        if (r.len < 5) return false;
         for (0..2) |i| if (!std.ascii.isDigit(r[i])) return false;
         if (r[2] != ':') return false;
         for (3..5) |i| if (!std.ascii.isDigit(r[i])) return false;
-        if (r[5] != ':') return false;
-        for (6..8) |i| if (!std.ascii.isDigit(r[i])) return false;
         return true;
     }
 
@@ -714,7 +713,13 @@ const Parser = struct {
         if (self.peek() != ':') { self.fillDiagnostic("expected ':' in time"); return error.InvalidTime; }
         _ = self.advance();
         const minute = try self.parseDigits(2);
-        if (self.peek() != ':') { self.fillDiagnostic("expected ':' in time"); return error.InvalidTime; }
+
+        // seconds are optional (TOML v1.1.0)
+        if (self.peek() != ':') {
+            if (hour > 23) { self.fillDiagnostic("invalid hour"); return error.InvalidTime; }
+            if (minute > 59) { self.fillDiagnostic("invalid minute"); return error.InvalidTime; }
+            return .{ .hour = @intCast(hour), .minute = @intCast(minute), .second = 0, .nanosecond = 0 };
+        }
         _ = self.advance();
         const second = try self.parseDigits(2);
 
@@ -832,23 +837,23 @@ const Parser = struct {
         var map = std.StringHashMap(TOMLValue).init(self.allocator);
         try map.ensureTotalCapacity(4);
 
-        self.skipWhitespace();
+        self.skipWhitespaceAndNewlines();
         if (self.peek() == '}') {
             _ = self.advance();
             return .{ .table = tableFromMap(map) };
         }
 
         while (true) {
-            self.skipWhitespace();
+            self.skipWhitespaceAndNewlines();
             const keys = try self.parseDottedKey();
-            self.skipWhitespace();
+            self.skipWhitespaceAndNewlines();
 
             if (self.peek() != '=') {
                 self.fillDiagnostic("expected '=' in inline table");
                 return error.UnexpectedChar;
             }
             _ = self.advance();
-            self.skipWhitespace();
+            self.skipWhitespaceAndNewlines();
 
             const value = try self.parseValue();
 
@@ -872,7 +877,7 @@ const Parser = struct {
             }
             try target.put(last, value);
 
-            self.skipWhitespace();
+            self.skipWhitespaceAndNewlines();
             if (self.peek() == '}') {
                 _ = self.advance();
                 break;
@@ -882,7 +887,7 @@ const Parser = struct {
                 return error.UnexpectedChar;
             }
             _ = self.advance(); // consume ','
-            self.skipWhitespace();
+            self.skipWhitespaceAndNewlines();
             // trailing comma (TOML 1.1)
             if (self.peek() == '}') {
                 _ = self.advance();

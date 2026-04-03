@@ -142,6 +142,21 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 
+    // E2E tests
+    const e2e_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("e2e/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "ztoml", .module = mod },
+            },
+        }),
+    });
+    const run_e2e_tests = b.addRunArtifact(e2e_tests);
+    const e2e_step = b.step("e2e", "Run E2E tests");
+    e2e_step.dependOn(&run_e2e_tests.step);
+
     // Benchmark executable
     const bench_exe = b.addExecutable(.{
         .name = "bench",

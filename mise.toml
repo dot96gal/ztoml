@@ -17,4 +17,8 @@ run = "zig build run --summary all"
 description = "bench"
 run = "zig build bench --summary all"
 
+[tasks.e2e]
+description = "e2e"
+run = "zig build e2e --summary all"
+
 

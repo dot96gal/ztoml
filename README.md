@@ -177,4 +177,7 @@ mise run test
 
 # ベンチマーク
 mise run bench
+
+# E2Eテスト
+mise run e2e
 ```
