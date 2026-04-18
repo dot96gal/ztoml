@@ -12,7 +12,7 @@ pub const ParseError = types.ParseError;
 pub const parseFromSlice = parser_mod.parseFromSlice;
 pub const parseFromSliceAs = deserialize_mod.parseFromSliceAs;
 pub const DeserializeError = deserialize_mod.DeserializeError;
-pub const TomlError = ParseError || DeserializeError;
+pub const TomlError = ParseError || DeserializeError || error{OutOfMemory};
 
 test {
     _ = types;

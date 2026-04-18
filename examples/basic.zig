@@ -13,6 +13,6 @@ pub fn main(env: std.process.Init) !void {
     var result = try toml.parseFromSlice(allocator, input, .{});
     defer result.deinit();
 
-    const name = result.value.get("name") orelse unreachable;
+    const name = result.value.get("name") orelse return error.MissingKey;
     std.debug.print("name = {s}\n", .{name.string});
 }

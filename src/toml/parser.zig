@@ -15,7 +15,7 @@ const Error = types.ParseError || error{OutOfMemory};
 // Public API
 // ============================================================
 
-pub fn parseFromSlice(allocator: Allocator, input: []const u8, options: ParseOptions) !Parsed(TOMLTable) {
+pub fn parseFromSlice(allocator: Allocator, input: []const u8, options: ParseOptions) (types.ParseError || error{OutOfMemory})!Parsed(TOMLTable) {
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
 
@@ -611,7 +611,11 @@ const Parser = struct {
         if (self.peek() == '.' or self.peek() == 'e' or self.peek() == 'E') {
             if (self.peek() == '.') {
                 _ = self.advance();
-                if (self.peek() == null or !std.ascii.isDigit(self.peek().?)) {
+                const first_digit = self.peek() orelse {
+                    self.fillDiagnostic("expected digit after decimal point");
+                    return error.InvalidNumber;
+                };
+                if (!std.ascii.isDigit(first_digit)) {
                     self.fillDiagnostic("expected digit after decimal point");
                     return error.InvalidNumber;
                 }
@@ -1114,7 +1118,7 @@ test "parseFromSlice: duplicate key error" {
 
 test "parseFromSlice: diagnostic on error" {
     var diag = Diagnostic{};
-    _ = parseFromSlice(std.testing.allocator, "key = ", .{ .diag = &diag }) catch {};
+    try std.testing.expectError(error.UnexpectedEof, parseFromSlice(std.testing.allocator, "key = ", .{ .diag = &diag }));
     try std.testing.expect(diag.line > 0);
     try std.testing.expect(diag.message.len > 0);
 }

@@ -24,7 +24,7 @@ pub fn parseFromSliceAs(
     allocator: Allocator,
     input: []const u8,
     options: ParseOptions,
-) !Parsed(T) {
+) (types.ParseError || DeserializeError || error{OutOfMemory})!Parsed(T) {
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
 
