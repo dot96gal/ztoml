@@ -1,16 +1,21 @@
-const toml = @import("toml/mod.zig");
+const std = @import("std");
+const types = @import("types.zig");
+const parser_mod = @import("parser.zig");
+const deserialize_mod = @import("deserialize.zig");
 
-pub const TOMLValue = toml.TOMLValue;
-pub const TOMLTable = toml.TOMLTable;
-pub const Parsed = toml.Parsed;
-pub const ParseOptions = toml.ParseOptions;
-pub const Diagnostic = toml.Diagnostic;
-pub const ParseError = toml.ParseError;
-pub const DeserializeError = toml.DeserializeError;
-pub const TomlError = toml.TomlError;
-pub const parseFromSlice = toml.parseFromSlice;
-pub const parseFromSliceAs = toml.parseFromSliceAs;
+pub const TOMLValue = types.TOMLValue;
+pub const TOMLTable = types.TOMLTable;
+pub const Parsed = types.Parsed;
+pub const ParseOptions = types.ParseOptions;
+pub const Diagnostic = types.Diagnostic;
+pub const ParseError = types.ParseError;
+pub const parseFromSlice = parser_mod.parseFromSlice;
+pub const parseFromSliceAs = deserialize_mod.parseFromSliceAs;
+pub const DeserializeError = deserialize_mod.DeserializeError;
+pub const TomlError = ParseError || DeserializeError || error{OutOfMemory};
 
 test {
-    _ = toml;
+    _ = types;
+    _ = parser_mod;
+    _ = deserialize_mod;
 }
