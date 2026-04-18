@@ -1,6 +1,14 @@
 [tools]
 zig = "0.15.2"
 
+[tasks.fmt]
+description = "format"
+run = "zig fmt src/"
+
+[tasks."fmt-check"]
+description = "format check"
+run = "zig fmt --check src/"
+
 [tasks.build]
 description = "build"
 run = "zig build --summary all"

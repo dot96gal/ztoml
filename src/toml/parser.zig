@@ -163,9 +163,15 @@ const Parser = struct {
                     if (e.keys.len == keys.len) {
                         var match = true;
                         for (e.keys, keys) |a, b| {
-                            if (!std.mem.eql(u8, a, b)) { match = false; break; }
+                            if (!std.mem.eql(u8, a, b)) {
+                                match = false;
+                                break;
+                            }
                         }
-                        if (match) { found = e; break; }
+                        if (match) {
+                            found = e;
+                            break;
+                        }
                     }
                 }
                 if (found == null) {
@@ -548,8 +554,14 @@ const Parser = struct {
     // ---- boolean ----
 
     fn parseBoolean(self: *Parser) !TOMLValue {
-        if (self.startsWith("true")) { self.pos += 4; return .{ .boolean = true }; }
-        if (self.startsWith("false")) { self.pos += 5; return .{ .boolean = false }; }
+        if (self.startsWith("true")) {
+            self.pos += 4;
+            return .{ .boolean = true };
+        }
+        if (self.startsWith("false")) {
+            self.pos += 5;
+            return .{ .boolean = false };
+        }
         self.fillDiagnostic("expected 'true' or 'false'");
         return error.UnexpectedChar;
     }
@@ -572,9 +584,18 @@ const Parser = struct {
         }
 
         if (!has_sign) {
-            if (self.startsWith("0x")) { self.pos += 2; return try self.parseBasedInt(16); }
-            if (self.startsWith("0o")) { self.pos += 2; return try self.parseBasedInt(8); }
-            if (self.startsWith("0b")) { self.pos += 2; return try self.parseBasedInt(2); }
+            if (self.startsWith("0x")) {
+                self.pos += 2;
+                return try self.parseBasedInt(16);
+            }
+            if (self.startsWith("0o")) {
+                self.pos += 2;
+                return try self.parseBasedInt(8);
+            }
+            if (self.startsWith("0b")) {
+                self.pos += 2;
+                return try self.parseBasedInt(2);
+            }
         }
 
         const digits_start = self.pos;
@@ -694,38 +715,68 @@ const Parser = struct {
 
     fn parseLocalDate(self: *Parser) !types.LocalDate {
         const year = try self.parseDigits(4);
-        if (self.peek() != '-') { self.fillDiagnostic("expected '-' in date"); return error.InvalidDate; }
+        if (self.peek() != '-') {
+            self.fillDiagnostic("expected '-' in date");
+            return error.InvalidDate;
+        }
         _ = self.advance();
         const month = try self.parseDigits(2);
-        if (self.peek() != '-') { self.fillDiagnostic("expected '-' in date"); return error.InvalidDate; }
+        if (self.peek() != '-') {
+            self.fillDiagnostic("expected '-' in date");
+            return error.InvalidDate;
+        }
         _ = self.advance();
         const day = try self.parseDigits(2);
 
-        if (month < 1 or month > 12) { self.fillDiagnostic("invalid month"); return error.InvalidDate; }
+        if (month < 1 or month > 12) {
+            self.fillDiagnostic("invalid month");
+            return error.InvalidDate;
+        }
         const max_day = daysInMonth(month, year);
-        if (day < 1 or day > max_day) { self.fillDiagnostic("invalid day"); return error.InvalidDate; }
+        if (day < 1 or day > max_day) {
+            self.fillDiagnostic("invalid day");
+            return error.InvalidDate;
+        }
 
         return .{ .year = @intCast(year), .month = @intCast(month), .day = @intCast(day) };
     }
 
     fn parseLocalTime(self: *Parser) !types.LocalTime {
         const hour = try self.parseDigits(2);
-        if (self.peek() != ':') { self.fillDiagnostic("expected ':' in time"); return error.InvalidTime; }
+        if (self.peek() != ':') {
+            self.fillDiagnostic("expected ':' in time");
+            return error.InvalidTime;
+        }
         _ = self.advance();
         const minute = try self.parseDigits(2);
 
         // seconds are optional (TOML v1.1.0)
         if (self.peek() != ':') {
-            if (hour > 23) { self.fillDiagnostic("invalid hour"); return error.InvalidTime; }
-            if (minute > 59) { self.fillDiagnostic("invalid minute"); return error.InvalidTime; }
+            if (hour > 23) {
+                self.fillDiagnostic("invalid hour");
+                return error.InvalidTime;
+            }
+            if (minute > 59) {
+                self.fillDiagnostic("invalid minute");
+                return error.InvalidTime;
+            }
             return .{ .hour = @intCast(hour), .minute = @intCast(minute), .second = 0, .nanosecond = 0 };
         }
         _ = self.advance();
         const second = try self.parseDigits(2);
 
-        if (hour > 23) { self.fillDiagnostic("invalid hour"); return error.InvalidTime; }
-        if (minute > 59) { self.fillDiagnostic("invalid minute"); return error.InvalidTime; }
-        if (second > 60) { self.fillDiagnostic("invalid second"); return error.InvalidTime; }
+        if (hour > 23) {
+            self.fillDiagnostic("invalid hour");
+            return error.InvalidTime;
+        }
+        if (minute > 59) {
+            self.fillDiagnostic("invalid minute");
+            return error.InvalidTime;
+        }
+        if (second > 60) {
+            self.fillDiagnostic("invalid second");
+            return error.InvalidTime;
+        }
 
         var nanosecond: u32 = 0;
         if (self.peek() == '.') {
@@ -735,7 +786,10 @@ const Parser = struct {
                 if (std.ascii.isDigit(c)) _ = self.advance() else break;
             }
             const frac = self.input[frac_start..self.pos];
-            if (frac.len == 0) { self.fillDiagnostic("expected fractional digits"); return error.InvalidTime; }
+            if (frac.len == 0) {
+                self.fillDiagnostic("expected fractional digits");
+                return error.InvalidTime;
+            }
             var ns: u64 = 0;
             const n = @min(frac.len, 9);
             for (frac[0..n]) |c| ns = ns * 10 + (c - '0');
@@ -775,19 +829,22 @@ const Parser = struct {
             return .{ .offset_date_time = .{
                 .datetime = .{ .date = date, .time = time },
                 .offset_minutes = 0,
-            }};
+            } };
         }
         if (self.peek() == '+' or self.peek() == '-') {
             const neg = self.advance().? == '-';
             const off_h = try self.parseDigits(2);
-            if (self.peek() != ':') { self.fillDiagnostic("expected ':' in tz offset"); return error.InvalidTime; }
+            if (self.peek() != ':') {
+                self.fillDiagnostic("expected ':' in tz offset");
+                return error.InvalidTime;
+            }
             _ = self.advance();
             const off_m = try self.parseDigits(2);
             const offset: i16 = @intCast(off_h * 60 + off_m);
             return .{ .offset_date_time = .{
                 .datetime = .{ .date = date, .time = time },
                 .offset_minutes = if (neg) -offset else offset,
-            }};
+            } };
         }
 
         return .{ .local_date_time = .{ .date = date, .time = time } };
