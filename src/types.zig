@@ -59,10 +59,10 @@ pub const Diagnostic = struct {
 pub fn Parsed(comptime T: type) type {
     return struct {
         value: T,
-        _arena: std.heap.ArenaAllocator,
+        arena: std.heap.ArenaAllocator,
 
         pub fn deinit(self: *@This()) void {
-            self._arena.deinit();
+            self.arena.deinit();
         }
     };
 }

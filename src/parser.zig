@@ -22,7 +22,7 @@ pub fn parseFromSlice(allocator: Allocator, input: []const u8, options: ParseOpt
     var parser = Parser.init(arena.allocator(), input, options);
     const table = try parser.parse();
 
-    return .{ .value = table, ._arena = arena };
+    return .{ .value = table, .arena = arena };
 }
 
 // ============================================================
@@ -1376,17 +1376,6 @@ test "parseFromSlice: quoted key" {
 
 test "parseFromSlice: tables and arrays mixed" {
     const input =
-        \\[database]
-        \\host = "localhost"
-        \\port = 5432
-        \\
-        \\fruits = ["apple", "banana"]
-        \\
-        \\point = {x = 1, y = 2}
-    ;
-    // Note: fruits and point are at top level (before [database] section ends)
-    // Let's adjust: put them before the section
-    const input2 =
         \\fruits = ["apple", "banana"]
         \\point = {x = 1, y = 2}
         \\
@@ -1394,7 +1383,7 @@ test "parseFromSlice: tables and arrays mixed" {
         \\host = "localhost"
         \\port = 5432
     ;
-    var result = try parseFromSlice(std.testing.allocator, input2, .{});
+    var result = try parseFromSlice(std.testing.allocator, input, .{});
     defer result.deinit();
 
     const fruits = result.value.get("fruits") orelse return error.TestFailed;
@@ -1406,7 +1395,6 @@ test "parseFromSlice: tables and arrays mixed" {
 
     const db = result.value.get("database") orelse return error.TestFailed;
     try std.testing.expectEqualStrings("localhost", db.table.get("host").?.string);
-    _ = input;
 }
 
 test "parseFromSlice: duplicate table header error" {

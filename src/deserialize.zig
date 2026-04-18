@@ -31,14 +31,14 @@ pub fn parseFromSliceAs(
     // parseFromSlice creates an inner ArenaAllocator(arena.allocator()).
     // Calling deinit() on it is safe because arena.allocator().free() is a no-op.
     var parsed = try parser_mod.parseFromSlice(arena.allocator(), input, options);
-    parsed._arena.deinit();
+    parsed.arena.deinit();
 
     const value = try coerce(T, .{ .table = parsed.value }, arena.allocator());
-    return .{ .value = value, ._arena = arena };
+    return .{ .value = value, .arena = arena };
 }
 
 /// Recursively coerce a TOMLValue into the target type T.
-pub fn coerce(comptime T: type, value: TOMLValue, allocator: Allocator) !T {
+pub fn coerce(comptime T: type, value: TOMLValue, allocator: Allocator) (DeserializeError || error{OutOfMemory})!T {
     switch (@typeInfo(T)) {
         .bool => {
             if (value != .boolean) return error.TypeMismatch;
