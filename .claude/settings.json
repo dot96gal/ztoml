@@ -2,9 +2,7 @@
   "plansDirectory": ".claude/plans",
   "permissions": {
     "allow": [
-      "Bash(mise run build)",
-      "Bash(mise run test)",
-      "Bash(mise run run)"
+      "Bash(mise run *)"
     ]
   },
   "hooks": {
@@ -20,5 +18,8 @@
         ]
       }
     ]
-  }
+  },
+  "enabledPlugins": {
+    "zls-plugin@local": true
+  } 
 }
