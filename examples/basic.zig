@@ -1,10 +1,8 @@
 const std = @import("std");
 const toml = @import("ztoml");
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(env: std.process.Init) !void {
+    const allocator = env.gpa;
 
     const input =
         \\name = "ztoml"

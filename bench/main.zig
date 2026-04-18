@@ -3,17 +3,15 @@ const toml = @import("ztoml");
 
 const RUNS: u64 = 1000;
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(env: std.process.Init) !void {
+    const allocator = env.gpa;
+    const io = env.io;
+    const raw_args = try env.minimal.args.toSlice(env.arena.allocator());
 
-    // Determine input file path: first arg or default
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
-    const path = if (args.len > 1) args[1] else "testdata/large.toml";
+    const path = if (raw_args.len > 1) raw_args[1] else "testdata/large.toml";
 
-    const input = try std.fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024);
+    const cwd = std.Io.Dir.cwd();
+    const input = try cwd.readFileAlloc(io, path, allocator, std.Io.Limit.limited(10 * 1024 * 1024));
     defer allocator.free(input);
 
     // Warm up
@@ -22,12 +20,12 @@ pub fn main() !void {
         result.deinit();
     }
 
-    var timer = try std.time.Timer.start();
+    const start = std.Io.Clock.Timestamp.now(io, .awake);
     for (0..RUNS) |_| {
         var result = try toml.parseFromSlice(allocator, input, .{});
         result.deinit();
     }
-    const elapsed_ns = timer.read();
+    const elapsed_ns: u64 = @intCast(start.durationTo(std.Io.Clock.Timestamp.now(io, .awake)).raw.toNanoseconds());
 
     const avg_ns = elapsed_ns / RUNS;
     const avg_us = avg_ns / 1000;

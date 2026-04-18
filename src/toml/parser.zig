@@ -131,7 +131,7 @@ const Parser = struct {
             keys: [][]const u8,
             tables: std.ArrayListUnmanaged(std.StringHashMap(TOMLValue)),
         };
-        var aot_entries: std.ArrayListUnmanaged(AotEntry) = .{};
+        var aot_entries: std.ArrayListUnmanaged(AotEntry) = .empty;
 
         self.skipWhitespaceAndNewlines();
 
@@ -175,7 +175,7 @@ const Parser = struct {
                     }
                 }
                 if (found == null) {
-                    try aot_entries.append(self.allocator, .{ .keys = keys, .tables = .{} });
+                    try aot_entries.append(self.allocator, .{ .keys = keys, .tables = .empty });
                     found = &aot_entries.items[aot_entries.items.len - 1];
                 }
 
@@ -292,7 +292,7 @@ const Parser = struct {
     }
 
     fn parseDottedKey(self: *Parser) ![][]const u8 {
-        var keys: std.ArrayListUnmanaged([]const u8) = .{};
+        var keys: std.ArrayListUnmanaged([]const u8) = .empty;
         try keys.append(self.allocator, try self.parseSingleKey());
         while (true) {
             self.skipWhitespace();
@@ -384,7 +384,7 @@ const Parser = struct {
 
     fn parseBasicString(self: *Parser) ![]const u8 {
         _ = self.advance(); // consume '"'
-        var buf: std.ArrayListUnmanaged(u8) = .{};
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
         while (true) {
             const c = self.peek() orelse {
                 self.fillDiagnostic("unterminated string");
@@ -415,7 +415,7 @@ const Parser = struct {
             _ = self.advance();
             if (self.peek() == '\n') _ = self.advance();
         }
-        var buf: std.ArrayListUnmanaged(u8) = .{};
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
         while (true) {
             const c = self.peek() orelse {
                 self.fillDiagnostic("unterminated multiline basic string");
@@ -854,7 +854,7 @@ const Parser = struct {
 
     fn parseArray(self: *Parser) Error!TOMLValue {
         _ = self.advance(); // consume '['
-        var items: std.ArrayListUnmanaged(TOMLValue) = .{};
+        var items: std.ArrayListUnmanaged(TOMLValue) = .empty;
 
         self.skipWhitespaceAndNewlines();
         if (self.peek() == ']') {
@@ -997,7 +997,7 @@ fn validateUnderscores(s: []const u8, parser: *Parser) !void {
 }
 
 fn parseIntStrip(allocator: Allocator, raw: []const u8) !std.ArrayListUnmanaged(u8) {
-    var buf: std.ArrayListUnmanaged(u8) = .{};
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
     for (raw) |c| {
         if (c != '_') try buf.append(allocator, c);
     }
@@ -1005,7 +1005,7 @@ fn parseIntStrip(allocator: Allocator, raw: []const u8) !std.ArrayListUnmanaged(
 }
 
 fn parseFloatStrip(allocator: Allocator, raw: []const u8) !?f64 {
-    var buf: std.ArrayListUnmanaged(u8) = .{};
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
     for (raw) |c| {
         if (c != '_') try buf.append(allocator, c);
