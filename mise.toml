@@ -9,8 +9,8 @@ run = "zig build --summary all"
 description = "test"
 run = "zig build test --summary all"
 
-[tasks.run]
-description = "run"
+[tasks.example]
+description = "example"
 run = "zig build run --summary all"
 
 [tasks.bench]

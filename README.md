@@ -180,4 +180,7 @@ mise run bench
 
 # E2Eテスト
 mise run e2e
+
+# サンプル実行
+mise run example
 ```
