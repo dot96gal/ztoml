@@ -9,8 +9,11 @@ const parser_mod = @import("parser.zig");
 
 /// デシリアライズ処理中に発生するエラーの集合。`parseFromSliceAs` から返される可能性がある。
 pub const DeserializeError = error{
+    /// デフォルト値のない必須フィールドが TOML に存在しない。
     MissingField,
+    /// TOML の値の型と対象の Zig 型が一致しない。
     TypeMismatch,
+    /// TOML の整数値が対象の Zig 整数型の範囲を超えている。
     IntegerOverflow,
 };
 
