@@ -7,18 +7,14 @@ const Parsed = types.Parsed;
 const ParseOptions = types.ParseOptions;
 const parser_mod = @import("parser.zig");
 
+/// デシリアライズ処理中に発生するエラーの集合。`parseFromSliceAs` から返される可能性がある。
 pub const DeserializeError = error{
     MissingField,
     TypeMismatch,
     IntegerOverflow,
 };
 
-/// Parse TOML input and deserialize directly into type T.
-///
-/// Memory model: a single ArenaAllocator is used for both parsing and the
-/// deserialized value. The inner arena created by parseFromSlice wraps our
-/// arena's allocator; calling deinit() on it is a no-op (ArenaAllocator ignores
-/// individual frees), so the data remains valid until `result.deinit()`.
+/// TOML 文字列をパースして型 `T` の値に直接デシリアライズする。返り値の `Parsed` は使い終わったら `deinit` を呼び出して解放する。
 pub fn parseFromSliceAs(
     comptime T: type,
     allocator: Allocator,
@@ -28,8 +24,7 @@ pub fn parseFromSliceAs(
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
 
-    // parseFromSlice creates an inner ArenaAllocator(arena.allocator()).
-    // Calling deinit() on it is safe because arena.allocator().free() is a no-op.
+    // parseFromSlice が内部で arena.allocator() を使うため、parsed.arena.deinit() は実質 no-op になり安全に呼べる。
     var parsed = try parser_mod.parseFromSlice(arena.allocator(), input, options);
     parsed.arena.deinit();
 
@@ -37,7 +32,7 @@ pub fn parseFromSliceAs(
     return .{ .value = value, .arena = arena };
 }
 
-/// Recursively coerce a TOMLValue into the target type T.
+/// `TOMLValue` を指定した型 `T` に再帰的に変換する。型が一致しない場合は `DeserializeError` を返す。
 pub fn coerce(comptime T: type, value: TOMLValue, allocator: Allocator) (DeserializeError || error{OutOfMemory})!T {
     switch (@typeInfo(T)) {
         .bool => {

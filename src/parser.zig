@@ -8,13 +8,14 @@ const Parsed = types.Parsed;
 const ParseOptions = types.ParseOptions;
 const Diagnostic = types.Diagnostic;
 
-/// All errors that can originate from parsing or allocation.
+// パースまたはアロケーションから発生するすべてのエラーの集合。
 const Error = types.ParseError || error{OutOfMemory};
 
 // ============================================================
 // Public API
 // ============================================================
 
+/// TOML 文字列をパースして `TOMLTable` を返す。返り値の `Parsed` は使い終わったら `deinit` を呼び出して解放する。
 pub fn parseFromSlice(allocator: Allocator, input: []const u8, options: ParseOptions) (types.ParseError || error{OutOfMemory})!Parsed(TOMLTable) {
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
@@ -455,7 +456,7 @@ const Parser = struct {
         return try buf.toOwnedSlice(self.allocator);
     }
 
-    /// Zero-copy: returns a slice into the original input.
+    // 元の入力スライスをそのまま返すためアロケーションが発生しない。
     fn parseLiteralString(self: *Parser) ![]const u8 {
         _ = self.advance(); // consume "'"
         const start = self.pos;
@@ -474,7 +475,7 @@ const Parser = struct {
         return error.UnexpectedEof;
     }
 
-    /// Zero-copy: returns a slice into the original input.
+    // 元の入力スライスをそのまま返すためアロケーションが発生しない。
     fn parseMultilineLiteralString(self: *Parser) ![]const u8 {
         self.pos += 3; // consume '''
         if (self.peek() == '\n') {
@@ -699,7 +700,6 @@ const Parser = struct {
         return true;
     }
 
-    /// Parse exactly `n` ASCII decimal digits and return the u32 value.
     fn parseDigits(self: *Parser, n: usize) !u32 {
         var value: u32 = 0;
         for (0..n) |_| {

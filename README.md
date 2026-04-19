@@ -1,5 +1,6 @@
 # ztoml
 
+[![API Docs](https://img.shields.io/badge/API%20Docs-GitHub%20Pages-blue)](https://dot96gal.github.io/ztoml/)
 [![test](https://github.com/dot96gal/ztoml/actions/workflows/test.yml/badge.svg)](https://github.com/dot96gal/ztoml/actions/workflows/test.yml)
 
 Zig 向け TOML v1.1.0 パーサライブラリ。外部依存ゼロ、Zig 標準ライブラリのみで実装。
