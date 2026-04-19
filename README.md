@@ -331,3 +331,7 @@ mise run release 1.2.3
 | `build-docs` | API ドキュメント生成 | `mise run build-docs` |
 | `serve-docs` | API ドキュメントのローカル配信 | `mise run serve-docs` |
 | `release` | バージョン更新・タグ付け・プッシュ | `mise run release <version>` |
+
+## ライセンス
+
+[MIT](LICENSE)
