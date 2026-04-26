@@ -10,6 +10,10 @@ run = "zig fmt src/"
 description = "format check"
 run = "zig fmt --check src/"
 
+[tasks.lint]
+description = "lint"
+run = "bash scripts/lint.sh"
+
 [tasks.build]
 description = "build"
 run = "zig build --summary all"
@@ -18,44 +22,17 @@ run = "zig build --summary all"
 description = "test"
 run = "zig build test --summary all"
 
-[tasks.example]
-description = "example"
-run = "zig build run --summary all"
+[tasks.e2e]
+description = "e2e"
+run = "zig build e2e --summary all"
 
 [tasks.bench]
 description = "bench"
 run = "zig build bench --summary all"
 
-[tasks.e2e]
-description = "e2e"
-run = "zig build e2e --summary all"
-
-[tasks.release]
-description = "bump version, commit, tag, and push"
-run = '''
-#!/usr/bin/env bash
-set -euo pipefail
-VERSION=${1:?usage: mise run release <version>}
-
-echo "v$VERSION のリリースを実行します:"
-echo "  1. build.zig.zon の .version を \"$VERSION\" に更新"
-echo "  2. git commit \"chore: bump version to v$VERSION\""
-echo "  3. git tag v$VERSION"
-echo "  4. git push origin main v$VERSION"
-echo ""
-read -r -p "続行しますか? [y/N]: " confirm
-case "$confirm" in
-  [yY]) ;;
-  *) echo "キャンセルしました。"; exit 0 ;;
-esac
-
-# 注意: sed -i '' は macOS (BSD sed) 専用。Linux (GNU sed) では -i のみで動作する。
-sed -i '' "s/\\.version = \".*\"/\\.version = \"$VERSION\"/" build.zig.zon
-git add build.zig.zon
-git commit -m "chore: bump version to v$VERSION"
-git tag "v$VERSION"
-git push origin main "v$VERSION"
-'''
+[tasks.example]
+description = "example"
+run = "zig build run --summary all"
 
 [tasks.build-docs]
 description = "build API documentation"
@@ -65,3 +42,7 @@ run = "zig build docs --summary all"
 description = "serve API documentation"
 depends = ["build-docs"]
 run = "npx --yes serve zig-out/docs"
+
+[tasks.release]
+description = "bump version, commit, tag, and push"
+run = "bash scripts/release.sh $@"

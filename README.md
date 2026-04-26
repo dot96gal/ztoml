@@ -1,7 +1,7 @@
 # ztoml
 
 [![API Docs](https://img.shields.io/badge/API%20Docs-GitHub%20Pages-blue)](https://dot96gal.github.io/ztoml/)
-[![test](https://github.com/dot96gal/ztoml/actions/workflows/test.yml/badge.svg)](https://github.com/dot96gal/ztoml/actions/workflows/test.yml)
+[![ci](https://github.com/dot96gal/ztoml/actions/workflows/ci.yml/badge.svg)](https://github.com/dot96gal/ztoml/actions/workflows/ci.yml)
 [![release](https://github.com/dot96gal/ztoml/actions/workflows/release.yml/badge.svg)](https://github.com/dot96gal/ztoml/actions/workflows/release.yml)
 
 Zig 向け TOML v1.1.0 パーサライブラリ。外部依存ゼロ、Zig 標準ライブラリのみで実装。
@@ -323,10 +323,11 @@ mise run release 1.2.3
 |--------|------|----------|
 | `fmt` | ソースコードのフォーマット | `mise run fmt` |
 | `fmt-check` | フォーマットチェック（CI 用） | `mise run fmt-check` |
+| `lint` | リント | `mise run lint` |
 | `build` | ビルド | `mise run build` |
 | `test` | テスト | `mise run test` |
-| `bench` | ベンチマーク | `mise run bench` |
 | `e2e` | E2E テスト | `mise run e2e` |
+| `bench` | ベンチマーク | `mise run bench` |
 | `example` | サンプル実行 | `mise run example` |
 | `build-docs` | API ドキュメント生成 | `mise run build-docs` |
 | `serve-docs` | API ドキュメントのローカル配信 | `mise run serve-docs` |
