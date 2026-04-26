@@ -5,7 +5,7 @@ const TOMLValue = types.TOMLValue;
 const TOMLTable = types.TOMLTable;
 const Parsed = types.Parsed;
 const ParseOptions = types.ParseOptions;
-const parser_mod = @import("parser.zig");
+const parserMod = @import("parser.zig");
 
 /// デシリアライズ処理中に発生するエラーの集合。`parseFromSliceAs` から返される可能性がある。
 pub const DeserializeError = error{
@@ -28,7 +28,7 @@ pub fn parseFromSliceAs(
     errdefer arena.deinit();
 
     // parseFromSlice が内部で arena.allocator() を使うため、parsed.arena.deinit() は実質 no-op になり安全に呼べる。
-    var parsed = try parser_mod.parseFromSlice(arena.allocator(), input, options);
+    var parsed = try parserMod.parseFromSlice(arena.allocator(), input, options);
     parsed.arena.deinit();
 
     const value = try coerce(T, .{ .table = parsed.value }, arena.allocator());

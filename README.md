@@ -300,7 +300,7 @@ bench/         # ベンチマーク（mise run bench で実行）
 
 | ワークフロー | トリガー | 内容 |
 |---|---|---|
-| `test.yml` | PR・main push | フォーマットチェック・ビルド・テストを実行 |
+| `ci.yml` | PR・main push | フォーマットチェック・リント・ビルド・テストを実行 |
 | `deploy-docs.yml` | main push | API ドキュメントを GitHub Pages へデプロイ |
 | `release.yml` | `v*` タグ push | GitHub Releases を自動生成（リリースノート付き） |
 

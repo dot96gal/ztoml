@@ -122,31 +122,31 @@ const Parser = struct {
     // ---- top-level parse ----
 
     fn parse(self: *Parser) !TOMLTable {
-        var root_map = std.StringHashMap(TOMLValue).init(self.allocator);
-        try root_map.ensureTotalCapacity(8);
-        var defined_tables = std.StringHashMap(void).init(self.allocator);
-        try defined_tables.ensureTotalCapacity(8);
+        var rootMap = std.StringHashMap(TOMLValue).init(self.allocator);
+        try rootMap.ensureTotalCapacity(8);
+        var definedTables = std.StringHashMap(void).init(self.allocator);
+        try definedTables.ensureTotalCapacity(8);
 
         // Array-of-tables storage
         const AotEntry = struct {
             keys: [][]const u8,
             tables: std.ArrayListUnmanaged(std.StringHashMap(TOMLValue)),
         };
-        var aot_entries: std.ArrayListUnmanaged(AotEntry) = .empty;
+        var aotEntries: std.ArrayListUnmanaged(AotEntry) = .empty;
 
         self.skipWhitespaceAndNewlines();
 
         // Root key-value pairs (before any [section])
         while (self.peek() != null and self.peek() != '[') {
-            try self.parseKeyValueInto(&root_map);
+            try self.parseKeyValueInto(&rootMap);
             self.skipWhitespaceAndNewlines();
         }
 
         // Table / array-of-table sections
         while (self.peek() == '[') {
-            const is_aot = self.pos + 1 < self.input.len and self.input[self.pos + 1] == '[';
+            const isAot = self.pos + 1 < self.input.len and self.input[self.pos + 1] == '[';
 
-            if (is_aot) {
+            if (isAot) {
                 // [[array]] header
                 self.pos += 2; // consume [[
                 self.skipWhitespace();
@@ -160,7 +160,7 @@ const Parser = struct {
 
                 // Find or create AotEntry for these keys
                 var found: ?*AotEntry = null;
-                for (aot_entries.items) |*e| {
+                for (aotEntries.items) |*e| {
                     if (e.keys.len == keys.len) {
                         var match = true;
                         for (e.keys, keys) |a, b| {
@@ -176,13 +176,13 @@ const Parser = struct {
                     }
                 }
                 if (found == null) {
-                    try aot_entries.append(self.allocator, .{ .keys = keys, .tables = .empty });
-                    found = &aot_entries.items[aot_entries.items.len - 1];
+                    try aotEntries.append(self.allocator, .{ .keys = keys, .tables = .empty });
+                    found = &aotEntries.items[aotEntries.items.len - 1];
                 }
 
-                var new_map = std.StringHashMap(TOMLValue).init(self.allocator);
-                try new_map.ensureTotalCapacity(8);
-                try found.?.tables.append(self.allocator, new_map);
+                var newMap = std.StringHashMap(TOMLValue).init(self.allocator);
+                try newMap.ensureTotalCapacity(8);
+                try found.?.tables.append(self.allocator, newMap);
                 const current = &found.?.tables.items[found.?.tables.items.len - 1];
 
                 try self.consumeNewlineOrEof();
@@ -205,13 +205,13 @@ const Parser = struct {
                 self.pos += 1; // consume ]
 
                 const path = try std.mem.join(self.allocator, ".", keys);
-                if (defined_tables.contains(path)) {
+                if (definedTables.contains(path)) {
                     self.fillDiagnostic("duplicate table definition");
                     return error.DuplicateKey;
                 }
-                try defined_tables.put(path, {});
+                try definedTables.put(path, {});
 
-                var target = &root_map;
+                var target = &rootMap;
                 for (keys) |k| {
                     const entry = try target.getOrPut(k);
                     if (!entry.found_existing) {
@@ -238,11 +238,11 @@ const Parser = struct {
         }
 
         // Finalize array-of-tables: convert accumulated maps to immutable arrays
-        for (aot_entries.items) |*entry| {
+        for (aotEntries.items) |*entry| {
             const arr = try self.allocator.alloc(TOMLValue, entry.tables.items.len);
             for (entry.tables.items, 0..) |map, i| arr[i] = .{ .table = tableFromMap(map) };
 
-            var target = &root_map;
+            var target = &rootMap;
             for (entry.keys[0 .. entry.keys.len - 1]) |k| {
                 const e = try target.getOrPut(k);
                 if (!e.found_existing) {
@@ -266,7 +266,7 @@ const Parser = struct {
             try target.put(last, .{ .array = arr });
         }
 
-        return tableFromMap(root_map);
+        return tableFromMap(rootMap);
     }
 
     // ---- key parsing ----
@@ -335,12 +335,12 @@ const Parser = struct {
                 },
             }
         }
-        const last_key = keys[keys.len - 1];
-        if (target.contains(last_key)) {
+        const lastKey = keys[keys.len - 1];
+        if (target.contains(lastKey)) {
             self.fillDiagnostic("duplicate key");
             return error.DuplicateKey;
         }
-        try target.put(last_key, value);
+        try target.put(lastKey, value);
 
         try self.consumeNewlineOrEof();
     }
@@ -571,20 +571,20 @@ const Parser = struct {
 
     fn parseNumber(self: *Parser) !TOMLValue {
         const start = self.pos;
-        const has_sign = self.peek() == '+' or self.peek() == '-';
-        const is_negative = has_sign and self.input[self.pos] == '-';
-        if (has_sign) _ = self.advance();
+        const hasSign = self.peek() == '+' or self.peek() == '-';
+        const isNegative = hasSign and self.input[self.pos] == '-';
+        if (hasSign) _ = self.advance();
 
         if (self.startsWith("inf")) {
             self.pos += 3;
-            return .{ .float = if (is_negative) -std.math.inf(f64) else std.math.inf(f64) };
+            return .{ .float = if (isNegative) -std.math.inf(f64) else std.math.inf(f64) };
         }
         if (self.startsWith("nan")) {
             self.pos += 3;
             return .{ .float = std.math.nan(f64) };
         }
 
-        if (!has_sign) {
+        if (!hasSign) {
             if (self.startsWith("0x")) {
                 self.pos += 2;
                 return try self.parseBasedInt(16);
@@ -599,11 +599,11 @@ const Parser = struct {
             }
         }
 
-        const digits_start = self.pos;
+        const digitsStart = self.pos;
         while (self.peek()) |c| {
             if (std.ascii.isDigit(c) or c == '_') _ = self.advance() else break;
         }
-        if (self.pos == digits_start) {
+        if (self.pos == digitsStart) {
             self.fillDiagnostic("expected digit");
             return error.UnexpectedChar;
         }
@@ -612,11 +612,11 @@ const Parser = struct {
         if (self.peek() == '.' or self.peek() == 'e' or self.peek() == 'E') {
             if (self.peek() == '.') {
                 _ = self.advance();
-                const first_digit = self.peek() orelse {
+                const firstDigit = self.peek() orelse {
                     self.fillDiagnostic("expected digit after decimal point");
                     return error.InvalidNumber;
                 };
-                if (!std.ascii.isDigit(first_digit)) {
+                if (!std.ascii.isDigit(firstDigit)) {
                     self.fillDiagnostic("expected digit after decimal point");
                     return error.InvalidNumber;
                 }
@@ -627,11 +627,11 @@ const Parser = struct {
             if (self.peek() == 'e' or self.peek() == 'E') {
                 _ = self.advance();
                 if (self.peek() == '+' or self.peek() == '-') _ = self.advance();
-                const exp_start = self.pos;
+                const expStart = self.pos;
                 while (self.peek()) |c| {
                     if (std.ascii.isDigit(c)) _ = self.advance() else break;
                 }
-                if (self.pos == exp_start) {
+                if (self.pos == expStart) {
                     self.fillDiagnostic("expected digit in exponent");
                     return error.InvalidNumber;
                 }
@@ -646,8 +646,8 @@ const Parser = struct {
 
         // integer
         const raw = self.input[start..self.pos];
-        const int_digits = if (has_sign) raw[1..] else raw;
-        try validateUnderscores(int_digits, self);
+        const intDigits = if (hasSign) raw[1..] else raw;
+        try validateUnderscores(intDigits, self);
         var stripped = try parseIntStrip(self.allocator, raw);
         defer stripped.deinit(self.allocator);
         const n = std.fmt.parseInt(i64, stripped.items, 10) catch {
@@ -736,8 +736,8 @@ const Parser = struct {
             self.fillDiagnostic("invalid month");
             return error.InvalidDate;
         }
-        const max_day = daysInMonth(month, year);
-        if (day < 1 or day > max_day) {
+        const maxDay = daysInMonth(month, year);
+        if (day < 1 or day > maxDay) {
             self.fillDiagnostic("invalid day");
             return error.InvalidDate;
         }
@@ -785,11 +785,11 @@ const Parser = struct {
         var nanosecond: u32 = 0;
         if (self.peek() == '.') {
             _ = self.advance();
-            const frac_start = self.pos;
+            const fracStart = self.pos;
             while (self.peek()) |c| {
                 if (std.ascii.isDigit(c)) _ = self.advance() else break;
             }
-            const frac = self.input[frac_start..self.pos];
+            const frac = self.input[fracStart..self.pos];
             if (frac.len == 0) {
                 self.fillDiagnostic("expected fractional digits");
                 return error.InvalidTime;
@@ -812,7 +812,7 @@ const Parser = struct {
     fn parseDateOrDateTime(self: *Parser) !TOMLValue {
         const date = try self.parseLocalDate();
 
-        const is_datetime = blk: {
+        const isDatetime = blk: {
             if (self.peek()) |sep| {
                 if (sep == 'T' or sep == 't') break :blk true;
                 // space separator: next char must be a digit (HH of time)
@@ -822,7 +822,7 @@ const Parser = struct {
             break :blk false;
         };
 
-        if (!is_datetime) return .{ .local_date = date };
+        if (!isDatetime) return .{ .local_date = date };
 
         _ = self.advance(); // consume T/t or space
         const time = try self.parseLocalTime();
@@ -837,14 +837,14 @@ const Parser = struct {
         }
         if (self.peek() == '+' or self.peek() == '-') {
             const neg = self.advance().? == '-';
-            const off_h = try self.parseDigits(2);
+            const offH = try self.parseDigits(2);
             if (self.peek() != ':') {
                 self.fillDiagnostic("expected ':' in tz offset");
                 return error.InvalidTime;
             }
             _ = self.advance();
-            const off_m = try self.parseDigits(2);
-            const offset: i16 = @intCast(off_h * 60 + off_m);
+            const offM = try self.parseDigits(2);
+            const offset: i16 = @intCast(offH * 60 + offM);
             return .{ .offset_date_time = .{
                 .datetime = .{ .date = date, .time = time },
                 .offset_minutes = if (neg) -offset else offset,
