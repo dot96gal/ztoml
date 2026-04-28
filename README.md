@@ -1,36 +1,34 @@
 # ztoml
 
 [![API Docs](https://img.shields.io/badge/API%20Docs-GitHub%20Pages-blue)](https://dot96gal.github.io/ztoml/)
-[![ci](https://github.com/dot96gal/ztoml/actions/workflows/ci.yml/badge.svg)](https://github.com/dot96gal/ztoml/actions/workflows/ci.yml)
-[![release](https://github.com/dot96gal/ztoml/actions/workflows/release.yml/badge.svg)](https://github.com/dot96gal/ztoml/actions/workflows/release.yml)
+[![CI](https://github.com/dot96gal/ztoml/actions/workflows/ci.yml/badge.svg)](https://github.com/dot96gal/ztoml/actions/workflows/ci.yml)
+[![Release](https://github.com/dot96gal/ztoml/actions/workflows/release.yml/badge.svg)](https://github.com/dot96gal/ztoml/actions/workflows/release.yml)
 
-Zig 向け TOML v1.1.0 パーサライブラリ。外部依存ゼロ、Zig 標準ライブラリのみで実装。
+Zig の TOML パーサーのライブラリ。
 
-## 開発方針
-
-このリポジトリは個人的な興味・学習を目的としたホビーライブラリです。設計上の判断はすべて作者が個人で行っており、利用者や外部からの意見をもとに変更する義務は負いません。
-
-また、事前の告知なく破壊的変更が加わることがあります。安定した API を前提としたい場合は、任意のコミットやタグ時点でこのリポジトリをフォークし、独自に管理されることをおすすめします。
+> **注意:** このリポジトリは個人的な興味・学習を目的としたホビーライブラリです。設計上の判断はすべて作者が個人で行っており、事前の告知なく破壊的変更が加わることがあります。安定した API を前提としたい場合は、任意のコミットやタグ時点でフォークし、独自に管理されることをおすすめします。
 
 ## 要件
 
 - Zig 0.16.0 以上
 
-## インストール
+## 利用者向け
 
-最新のタグは [GitHub Releases](https://github.com/dot96gal/ztoml/releases) で確認できる
+### インストール
 
-以下のコマンドを実行すると、`build.zig.zon` の `.dependencies` に自動的に追加される
+最新のタグは [GitHub Releases](https://github.com/dot96gal/ztoml/releases) で確認できる。
+
+以下のコマンドを実行すると、`build.zig.zon` の `.dependencies` に自動的に追加される。
 
 ```sh
-zig fetch --save https://github.com/dot96gal/ztoml/archive/<commit-or-tag>.tar.gz
+zig fetch --save https://github.com/dot96gal/ztoml/archive/<version>.tar.gz
 ```
 
 ```zig
 // build.zig.zon（自動追加される内容の例）
 .dependencies = .{
     .ztoml = .{
-        .url = "https://github.com/dot96gal/ztoml/archive/<commit-or-tag>.tar.gz",
+        .url = "https://github.com/dot96gal/ztoml/archive/<version>.tar.gz",
         .hash = "<zig fetch が出力したハッシュ>",
     },
 },
@@ -49,9 +47,9 @@ const ztoml_mod = ztoml_dep.module("ztoml");
 exe.root_module.addImport("ztoml", ztoml_mod);
 ```
 
-## 使い方
+### 使い方
 
-### 構造体へ直接マッピング（推奨）
+#### 構造体へ直接マッピング（推奨）
 
 `parseFromSliceAs` を使うと、TOML 文字列をユーザ定義の構造体に直接変換できる。
 
@@ -80,7 +78,7 @@ const config = result.value;
 // config.debug => true
 ```
 
-### 動的アクセス
+#### 動的アクセス
 
 `parseFromSlice` を使うと、`TOMLTable` としてキーを動的に参照できる。
 
@@ -133,7 +131,7 @@ switch (val) {
 }
 ```
 
-### エラー診断
+#### エラー診断
 
 `Diagnostic` を渡すとエラー発生位置（行・列）とメッセージを取得できる。
 
@@ -146,7 +144,7 @@ var result = toml.parseFromSlice(allocator, input, .{ .diag = &diag }) catch |er
 defer result.deinit();
 ```
 
-## 対応する TOML 型
+### 対応する TOML 型
 
 | TOML 型 | Zig 型 |
 |---------|--------|
@@ -161,7 +159,7 @@ defer result.deinit();
 | Local Date | `toml.LocalDate` |
 | Local Time | `toml.LocalTime` |
 
-### 日付・時刻型のフィールド
+#### 日付・時刻型のフィールド
 
 ```zig
 pub const LocalDate = struct {
@@ -188,11 +186,11 @@ pub const OffsetDateTime = struct {
 };
 ```
 
-## 公開 API
+### API リファレンス
 
 詳細は [API ドキュメント](https://dot96gal.github.io/ztoml/) を参照。
 
-### 関数
+#### 関数
 
 ```zig
 // 構造体へ直接マッピング
@@ -202,7 +200,7 @@ pub fn parseFromSliceAs(comptime T: type, allocator: Allocator, input: []const u
 pub fn parseFromSlice(allocator: Allocator, input: []const u8, options: ParseOptions) !Parsed(TOMLTable)
 ```
 
-### 型
+#### 型
 
 ```zig
 pub const ParseOptions = struct {
@@ -242,7 +240,7 @@ pub const TOMLTable = struct {
 };
 ```
 
-### エラー型
+#### エラー型
 
 ```zig
 pub const ParseError = error{
@@ -257,7 +255,7 @@ pub const DeserializeError = error{
 pub const TomlError = ParseError || DeserializeError;
 ```
 
-## メモリ管理
+### メモリ管理
 
 `Parsed(T)` が内部の `ArenaAllocator` を保持する。`deinit()` を呼ぶと `value` 内の文字列・配列を含むすべてのメモリが解放される。
 
@@ -271,9 +269,17 @@ const config = result.value;
 
 > **注意:** `deinit()` 後に `value` 内の `[]const u8` を参照すると use-after-free になる。
 
-## 開発
+---
 
-タスクランナーに [mise](https://mise.jdx.dev/) を使用している。`mise.toml` で Zig / zls のバージョンも管理している。
+## 開発者向け
+
+### 必要なツール
+
+| ツール | 説明 |
+|-------|------|
+| [mise](https://mise.jdx.dev/) | ツールバージョン管理（Zig・zls を自動インストール） |
+| `zig-lint` | Zig 簡易リントスクリプト（`~/.local/bin/` にインストール済み） |
+| `zig-release` | バージョン更新・タグ付けスクリプト（`~/.local/bin/` にインストール済み） |
 
 ### セットアップ
 
@@ -283,17 +289,35 @@ cd ztoml
 mise install   # Zig・zls を自動インストール
 ```
 
-### プロジェクト構成
+### タスク一覧
+
+| コマンド | 説明 |
+|---------|------|
+| `mise run fmt` | フォーマット |
+| `mise run fmt-check` | フォーマットチェック（CI 用） |
+| `mise run lint` | リント |
+| `mise run build` | ビルド |
+| `mise run test` | テスト |
+| `mise run e2e` | E2E テスト |
+| `mise run bench` | ベンチマーク |
+| `mise run example` | サンプル実行 |
+| `mise run build-docs` | API ドキュメント生成 |
+| `mise run serve-docs` | API ドキュメントのローカル配信 |
+| `mise run release <version>` | バージョン更新・タグ付け・プッシュ |
+
+### ファイル構成
 
 ```
-src/           # ライブラリ本体
-  root.zig     # 公開 API のエントリポイント
-  types.zig    # 型定義（TOMLValue・TOMLTable・Parsed など）
-  parser.zig   # TOML パーサ
-  deserialize.zig # 構造体へのデシリアライザ
-examples/      # サンプルコード（mise run example で実行）
-e2e/           # E2E テスト（mise run e2e で実行）
-bench/         # ベンチマーク（mise run bench で実行）
+build.zig          # ビルドスクリプト
+build.zig.zon      # パッケージメタデータ・依存関係
+src/               # ライブラリ本体
+  root.zig         # 公開 API のエントリポイント
+  types.zig        # 型定義（TOMLValue・TOMLTable・Parsed など）
+  parser.zig       # TOML パーサ
+  deserialize.zig  # 構造体へのデシリアライザ
+examples/          # サンプルコード（mise run example で実行）
+e2e/               # E2E テスト（mise run e2e で実行）
+bench/             # ベンチマーク（mise run bench で実行）
 ```
 
 ### CI/CD
@@ -317,21 +341,7 @@ bench/         # ベンチマーク（mise run bench で実行）
 mise run release 1.2.3
 ```
 
-### タスク一覧
-
-| タスク | 説明 | コマンド |
-|--------|------|----------|
-| `fmt` | ソースコードのフォーマット | `mise run fmt` |
-| `fmt-check` | フォーマットチェック（CI 用） | `mise run fmt-check` |
-| `lint` | リント | `mise run lint` |
-| `build` | ビルド | `mise run build` |
-| `test` | テスト | `mise run test` |
-| `e2e` | E2E テスト | `mise run e2e` |
-| `bench` | ベンチマーク | `mise run bench` |
-| `example` | サンプル実行 | `mise run example` |
-| `build-docs` | API ドキュメント生成 | `mise run build-docs` |
-| `serve-docs` | API ドキュメントのローカル配信 | `mise run serve-docs` |
-| `release` | バージョン更新・タグ付け・プッシュ | `mise run release <version>` |
+---
 
 ## ライセンス
 

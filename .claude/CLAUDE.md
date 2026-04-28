@@ -2,7 +2,7 @@
 
 ## プロジェクトの概要
 
-- TOMLパーサのライブラリを開発する
+- Zig の TOML パーサのライブラリを開発する
 
 ## 計画ファイル
 
@@ -23,4 +23,5 @@
 
 ## コーディング規約
 
-- `.claude/rules/zig.md` を参照すること。
+- [Zig スタイルガイド](https://ziglang.org/documentation/master/#Style-Guide) に従う。
+
