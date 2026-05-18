@@ -43,6 +43,15 @@ description = "serve API documentation"
 depends = ["build-docs"]
 run = "npx --yes serve zig-out/docs"
 
+[tasks.build-coverage]
+description = "build coverage report"
+run = "zig-coverage --output=zig-out/coverage"
+
+[tasks."serve-coverage"]
+description = "serve coverage report"
+depends = ["build-coverage"]
+run = "npx --yes http-server zig-out/coverage"
+
 [tasks.release]
 description = "bump version, commit, tag, and push"
 run = "zig-release $@"

@@ -227,6 +227,8 @@ mise install   # Zig・zls を自動インストール
 | `mise run example:basic` | サンプル実行 |
 | `mise run build-docs` | API ドキュメント生成 |
 | `mise run serve-docs` | API ドキュメントのローカル配信 |
+| `mise run build-coverage` | テストカバレッジレポート生成 |
+| `mise run serve-coverage` | テストカバレッジレポートのローカル配信 |
 | `mise run release <version>` | バージョン更新・タグ付け・プッシュ |
 
 #### CI/CD
