@@ -1614,6 +1614,7 @@ test "appendUtf8Byte: success" {
         input: []const u8,
         expected: []const u8,
     }{
+        .{ .name = "ASCII byte", .input = "a", .expected = "a" },
         .{ .name = "2-byte UTF-8", .input = "\xC3\xA9", .expected = "\xC3\xA9" },
         .{ .name = "3-byte UTF-8", .input = "\xE3\x81\x82", .expected = "\xE3\x81\x82" },
         .{ .name = "4-byte UTF-8", .input = "\xF0\x9F\x98\x80", .expected = "\xF0\x9F\x98\x80" },

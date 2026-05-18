@@ -273,6 +273,11 @@ test "parseDocument: success" {
             .input = .{ .data = "x = 0\n[a]\nb = 2\n", .key_path = &.{ "a", "b" } },
             .expected = 2,
         },
+        .{
+            .name = "nested table section",
+            .input = .{ .data = "[a.b]\nc = 3\n", .key_path = &.{ "a", "b", "c" } },
+            .expected = 3,
+        },
     };
 
     for (test_cases) |tc| {
