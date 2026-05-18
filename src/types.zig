@@ -1,136 +1,340 @@
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 
-// ---- Datetime types ----
+pub const OffsetDateTime = struct {
+    datetime: LocalDateTime,
+    offset_minutes: i16,
+};
 
-/// ローカル日付（年・月・日）を表す構造体。TOML の Local Date 型の値を保持するために利用する。
+pub const LocalDateTime = struct {
+    date: LocalDate,
+    time: LocalTime,
+};
+
 pub const LocalDate = struct {
     year: u16,
     month: u8,
     day: u8,
 };
-/// ローカル時刻（時・分・秒・ナノ秒）を表す構造体。TOML の Local Time 型の値を保持するために利用する。
+
 pub const LocalTime = struct {
     hour: u8,
     minute: u8,
     second: u8,
-    /// サブ秒精度をナノ秒単位で保持する。
     nanosecond: u32,
 };
-/// タイムゾーン情報を持たない日時を表す構造体。TOML の Local Date-Time 型の値を保持するために利用する。
-pub const LocalDateTime = struct {
-    date: LocalDate,
-    time: LocalTime,
-};
-/// UTC オフセット付きの日時を表す構造体。TOML の Offset Date-Time 型の値を保持するために利用する。
-pub const OffsetDateTime = struct {
-    /// タイムゾーン情報を持たない日時部分。
-    datetime: LocalDateTime,
-    /// UTC からのオフセット（分単位）。例: +09:00 は 540、-05:00 は -300。
-    offset_minutes: i16,
-};
 
-// ---- Core value type ----
+// TOML 仕様の用語を型名として利用
+pub const Table = struct {
+    inner: std.StringHashMapUnmanaged(Value),
+    is_inline: bool = false,
 
-/// TOML の任意の値を表すタグ付きユニオン。パース結果のすべての値型を統一的に扱うために利用する。
-pub const TOMLValue = union(enum) {
-    /// TOML の String 型。UTF-8 文字列として保持する。
-    string: []const u8,
-    /// TOML の Integer 型。`i64` として保持する。`parseFromSliceAs` では `u8`〜`i64` など任意の整数型に変換可。
-    integer: i64,
-    /// TOML の Float 型。`f64` として保持する。
-    float: f64,
-    /// TOML の Boolean 型。
-    boolean: bool,
-    /// TOML の Array 型。要素は再帰的に `TOMLValue` となる。
-    array: []const TOMLValue,
-    /// TOML の Table 型。
-    table: TOMLTable,
-    /// TOML の Offset Date-Time 型。
-    offset_date_time: OffsetDateTime,
-    /// TOML の Local Date-Time 型。
-    local_date_time: LocalDateTime,
-    /// TOML の Local Date 型。
-    local_date: LocalDate,
-    /// TOML の Local Time 型。
-    local_time: LocalTime,
-};
-
-/// TOML テーブルを表す構造体。キーと値のペアを保持し、読み取り専用で利用する。
-pub const TOMLTable = struct {
-    /// キーと値のペアを保持する内部ハッシュマップ。直接操作せず `get` / `iterator` / `count` を使うこと。
-    inner: std.StringHashMap(TOMLValue),
-
-    /// キーに対応する値を取得する。キーが存在しない場合は `null` を返す。
-    pub fn get(self: TOMLTable, key: []const u8) ?TOMLValue {
+    pub fn get(self: Table, key: []const u8) ?Value {
         return self.inner.get(key);
     }
 
-    /// テーブル内のすべてのキーと値を走査するイテレータを返す。
-    pub fn iterator(self: TOMLTable) std.StringHashMap(TOMLValue).Iterator {
-        return self.inner.iterator();
-    }
-
-    /// テーブルに含まれるキーと値のペアの個数を返す。
-    pub fn count(self: TOMLTable) usize {
+    pub fn count(self: Table) usize {
         return self.inner.count();
     }
+
+    pub fn iterator(self: *const Table) std.StringHashMapUnmanaged(Value).Iterator {
+        return self.inner.iterator();
+    }
 };
 
-/// `StringHashMap` から `TOMLTable` を構築する。パーサ内部で利用する。
-pub fn tableFromMap(map: std.StringHashMap(TOMLValue)) TOMLTable {
-    return .{ .inner = map };
-}
+pub const AotArray = struct {
+    inner: *std.ArrayListUnmanaged(Value),
 
-/// パース時のオプションを指定する構造体。エラー診断情報の出力先を設定するために利用する。
-pub const ParseOptions = struct {
-    /// エラー診断情報の書き込み先。省略した場合（`null`）は診断情報を収集しない。
-    diag: ?*Diagnostic = null,
+    pub fn items(self: AotArray) []const Value {
+        return self.inner.items;
+    }
+
+    pub fn len(self: AotArray) usize {
+        return self.inner.items.len;
+    }
+
+    pub fn lastPtr(self: AotArray) *Value {
+        if (self.inner.items.len == 0) @panic("AotArray.lastPtr: array is empty");
+        return &self.inner.items[self.inner.items.len - 1];
+    }
 };
 
-/// パースエラーの診断情報を保持する構造体。エラー発生位置（行・列）とメッセージを確認するために利用する。
+// TOML 仕様の用語を型名として利用
+pub const Value = union(enum) {
+    string: []const u8,
+    integer: i64,
+    float: f64,
+    boolean: bool,
+    array: []const Value,
+    aot_array: AotArray,
+    table: Table,
+    offset_date_time: OffsetDateTime,
+    local_date_time: LocalDateTime,
+    local_date: LocalDate,
+    local_time: LocalTime,
+};
+
 pub const Diagnostic = struct {
-    /// エラーが発生した行番号（1 始まり）。
     line: usize = 0,
-    /// エラーが発生した列番号（1 始まり）。
-    col: usize = 0,
-    /// エラーの内容を示すメッセージ。
+    column: usize = 0,
     message: []const u8 = "",
 };
 
-/// パース結果の値とメモリアリーナをまとめたコンテナ型。`deinit` を呼び出してメモリを解放するために利用する。
+pub const ParseOptions = struct {
+    diagnostic: ?*Diagnostic = null,
+};
+
 pub fn Parsed(comptime T: type) type {
     return struct {
-        /// パース結果の値。`deinit` を呼び出した後は参照しないこと（use-after-free）。
         value: T,
-        /// パース結果が使用するメモリアリーナ。直接操作せず `deinit` を通じて解放すること。
         arena: std.heap.ArenaAllocator,
 
-        /// `value` 内の文字列・配列を含むすべてのメモリを解放する。
         pub fn deinit(self: *@This()) void {
             self.arena.deinit();
         }
     };
 }
 
-/// パース処理中に発生するエラーの集合。`parseFromSlice` および `parseFromSliceAs` から返される可能性がある。
-pub const ParseError = error{
-    /// 入力が途中で終了した。
-    UnexpectedEof,
-    /// 文法上許容されない文字が現れた。
-    UnexpectedChar,
-    /// 文字列内の `\` エスケープシーケンスが不正。
-    InvalidEscape,
-    /// `\uXXXX` / `\UXXXXXXXX` で指定された Unicode コードポイントが不正。
-    InvalidUnicode,
-    /// 同じキーが複数回定義されている。
-    DuplicateKey,
-    /// 数値リテラルの形式が不正。
-    InvalidNumber,
-    /// 日付リテラルの形式が不正（例: 月・日の範囲外）。
-    InvalidDate,
-    /// 時刻リテラルの形式が不正（例: 時・分・秒の範囲外）。
-    InvalidTime,
-    /// 値の後に余分な内容が続いている。
-    TrailingContent,
-};
+// --- Table.get ---
+
+test "Table.get: success" {
+    const test_cases = [_]struct {
+        name: []const u8,
+        input: struct { key: []const u8, value: Value },
+        expected: ?Value,
+    }{
+        .{
+            .name = "existing key",
+            .input = .{ .key = "key", .value = .{ .integer = 42 } },
+            .expected = .{ .integer = 42 },
+        },
+        .{
+            .name = "empty string key",
+            .input = .{ .key = "", .value = .{ .integer = 0 } },
+            .expected = .{ .integer = 0 },
+        },
+    };
+
+    for (test_cases) |tc| {
+        errdefer std.debug.print("FAIL: {s}\n", .{tc.name});
+
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var map: std.StringHashMapUnmanaged(Value) = .empty;
+        try map.put(arena.allocator(), tc.input.key, tc.input.value);
+        const table: Table = .{ .inner = map };
+        try std.testing.expectEqual(tc.expected, table.get(tc.input.key));
+    }
+}
+
+test "Table.get: returns null for missing key" {
+    const map: std.StringHashMapUnmanaged(Value) = .empty;
+    const table: Table = .{ .inner = map };
+    try std.testing.expect(table.get("missing") == null);
+}
+
+// --- Table.count ---
+
+test "Table.count: correct for various sizes" {
+    const Entry = struct { key: []const u8, val: Value };
+    const test_cases = [_]struct {
+        name: []const u8,
+        input: []const Entry,
+        expected: usize,
+    }{
+        .{
+            .name = "empty",
+            .input = &.{},
+            .expected = 0,
+        },
+        .{
+            .name = "one entry",
+            .input = &.{
+                .{ .key = "a", .val = .{ .boolean = true } },
+            },
+            .expected = 1,
+        },
+        .{
+            .name = "two entries",
+            .input = &.{
+                .{ .key = "a", .val = .{ .boolean = true } },
+                .{ .key = "b", .val = .{ .boolean = false } },
+            },
+            .expected = 2,
+        },
+    };
+
+    for (test_cases) |tc| {
+        errdefer std.debug.print("FAIL: {s}\n", .{tc.name});
+
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var map: std.StringHashMapUnmanaged(Value) = .empty;
+        for (tc.input) |e| try map.put(arena.allocator(), e.key, e.val);
+        const table: Table = .{ .inner = map };
+        try std.testing.expectEqual(tc.expected, table.count());
+    }
+}
+
+// --- Table.iterator ---
+
+test "Table.iterator: returns null for empty table" {
+    const map: std.StringHashMapUnmanaged(Value) = .empty;
+    const table: Table = .{ .inner = map };
+    var iter = table.iterator();
+    try std.testing.expect(iter.next() == null);
+}
+
+test "Table.iterator: walks all entries" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var map: std.StringHashMapUnmanaged(Value) = .empty;
+    try map.put(arena.allocator(), "x", .{ .integer = 1 });
+    const table: Table = .{ .inner = map };
+    var iter = table.iterator();
+    var count: usize = 0;
+    var found = false;
+    while (iter.next()) |entry| {
+        count += 1;
+        if (std.mem.eql(u8, entry.key_ptr.*, "x")) {
+            try std.testing.expectEqual(@as(i64, 1), entry.value_ptr.integer);
+            found = true;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), count);
+    try std.testing.expect(found);
+}
+
+test "Table.iterator: walks multiple entries" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var map: std.StringHashMapUnmanaged(Value) = .empty;
+    try map.put(arena.allocator(), "a", .{ .integer = 1 });
+    try map.put(arena.allocator(), "b", .{ .integer = 2 });
+    const table: Table = .{ .inner = map };
+    var iter = table.iterator();
+    var count: usize = 0;
+    var found_a = false;
+    var found_b = false;
+    while (iter.next()) |entry| {
+        count += 1;
+        if (std.mem.eql(u8, entry.key_ptr.*, "a")) {
+            try std.testing.expectEqual(@as(i64, 1), entry.value_ptr.integer);
+            found_a = true;
+        } else if (std.mem.eql(u8, entry.key_ptr.*, "b")) {
+            try std.testing.expectEqual(@as(i64, 2), entry.value_ptr.integer);
+            found_b = true;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 2), count);
+    try std.testing.expect(found_a);
+    try std.testing.expect(found_b);
+}
+
+// --- AotArray.items ---
+
+test "AotArray.items: returns correct elements" {
+    const test_cases = [_]struct {
+        name: []const u8,
+        input: []const Value,
+        expected: []const Value,
+    }{
+        .{
+            .name = "empty",
+            .input = &.{},
+            .expected = &.{},
+        },
+        .{
+            .name = "one element",
+            .input = &.{.{ .integer = 1 }},
+            .expected = &.{.{ .integer = 1 }},
+        },
+        .{
+            .name = "two elements",
+            .input = &.{ .{ .integer = 1 }, .{ .integer = 2 } },
+            .expected = &.{ .{ .integer = 1 }, .{ .integer = 2 } },
+        },
+    };
+
+    for (test_cases) |tc| {
+        errdefer std.debug.print("FAIL: {s}\n", .{tc.name});
+
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var list: std.ArrayListUnmanaged(Value) = .empty;
+        for (tc.input) |v| try list.append(arena.allocator(), v);
+        const aot: AotArray = .{ .inner = &list };
+        try std.testing.expectEqualSlices(Value, tc.expected, aot.items());
+    }
+}
+
+// --- AotArray.len ---
+
+test "AotArray.len: returns correct length" {
+    const test_cases = [_]struct {
+        name: []const u8,
+        input: []const Value,
+        expected: usize,
+    }{
+        .{
+            .name = "empty",
+            .input = &.{},
+            .expected = 0,
+        },
+        .{
+            .name = "one element",
+            .input = &.{.{ .integer = 1 }},
+            .expected = 1,
+        },
+        .{
+            .name = "two elements",
+            .input = &.{ .{ .integer = 1 }, .{ .integer = 2 } },
+            .expected = 2,
+        },
+    };
+
+    for (test_cases) |tc| {
+        errdefer std.debug.print("FAIL: {s}\n", .{tc.name});
+
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var list: std.ArrayListUnmanaged(Value) = .empty;
+        for (tc.input) |v| try list.append(arena.allocator(), v);
+        const aot: AotArray = .{ .inner = &list };
+        try std.testing.expectEqual(tc.expected, aot.len());
+    }
+}
+
+// --- AotArray.lastPtr ---
+
+test "AotArray.lastPtr: returns pointer to last element" {
+    const test_cases = [_]struct {
+        name: []const u8,
+        input: []const Value,
+        expected: Value,
+    }{
+        .{ .name = "one element", .input = &.{.{ .integer = 1 }}, .expected = .{ .integer = 1 } },
+        .{ .name = "two elements", .input = &.{ .{ .integer = 1 }, .{ .integer = 2 } }, .expected = .{ .integer = 2 } },
+    };
+
+    for (test_cases) |tc| {
+        errdefer std.debug.print("FAIL: {s}\n", .{tc.name});
+
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var list: std.ArrayListUnmanaged(Value) = .empty;
+        for (tc.input) |v| try list.append(arena.allocator(), v);
+        const aot: AotArray = .{ .inner = &list };
+        try std.testing.expectEqual(tc.expected, aot.lastPtr().*);
+    }
+}
+
+// --- Parsed.deinit ---
+
+test "Parsed.deinit: frees arena memory" {
+    var parsed = Parsed(i64){
+        .value = 42,
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
+    };
+    _ = try parsed.arena.allocator().alloc(u8, 16);
+    parsed.deinit();
+}

@@ -30,9 +30,9 @@ run = "zig build e2e --summary all"
 description = "bench"
 run = "zig build bench --summary all"
 
-[tasks.example]
-description = "example"
-run = "zig build run --summary all"
+[tasks."example:basic"]
+description = "example:basic"
+run = "zig build example-basic --summary all"
 
 [tasks.build-docs]
 description = "build API documentation"

@@ -1,1380 +1,363 @@
 const std = @import("std");
-const Allocator = std.mem.Allocator;
+const cursor_mod = @import("cursor.zig");
+const document = @import("document.zig");
+const errors = @import("errors.zig");
 const types = @import("types.zig");
-const TOMLValue = types.TOMLValue;
-const TOMLTable = types.TOMLTable;
-const tableFromMap = types.tableFromMap;
-const Parsed = types.Parsed;
+
+const Cursor = cursor_mod.Cursor;
 const ParseOptions = types.ParseOptions;
 const Diagnostic = types.Diagnostic;
+const Table = types.Table;
+const Value = types.Value;
 
-// パースまたはアロケーションから発生するすべてのエラーの集合。
-const Error = types.ParseError || error{OutOfMemory};
-
-// ============================================================
-// Public API
-// ============================================================
-
-/// TOML 文字列をパースして `TOMLTable` を返す。返り値の `Parsed` は使い終わったら `deinit` を呼び出して解放する。
-pub fn parseFromSlice(allocator: Allocator, input: []const u8, options: ParseOptions) (types.ParseError || error{OutOfMemory})!Parsed(TOMLTable) {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    errdefer arena.deinit();
-
-    var parser = Parser.init(arena.allocator(), input, options);
-    const table = try parser.parse();
-
-    return .{ .value = table, .arena = arena };
-}
-
-// ============================================================
-// Parser
-// ============================================================
-
-const Parser = struct {
-    allocator: Allocator,
+pub fn parse(
+    arena: *std.heap.ArenaAllocator,
     input: []const u8,
-    pos: usize,
-    diag: ?*Diagnostic,
+    options: ParseOptions,
+) (errors.ParseError || error{OutOfMemory})!Table {
+    var cursor = Cursor.init(input, options.diagnostic);
+    return document.parseDocument(&cursor, arena);
+}
 
-    fn init(allocator: Allocator, input: []const u8, options: ParseOptions) Parser {
-        return .{
-            .allocator = allocator,
-            .input = input,
-            .pos = 0,
-            .diag = options.diag,
-        };
-    }
+// --- parse ---
 
-    // ---- utilities ----
+test "parse: success: basic key-value" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const table = try parse(&arena, "a = 1\n", .{});
+    const val = table.get("a") orelse return error.TestFailed;
+    try std.testing.expectEqual(Value{ .integer = 1 }, val);
+}
 
-    fn peek(self: *Parser) ?u8 {
-        if (self.pos >= self.input.len) return null;
-        return self.input[self.pos];
-    }
-
-    fn advance(self: *Parser) ?u8 {
-        if (self.pos >= self.input.len) return null;
-        const c = self.input[self.pos];
-        self.pos += 1;
-        return c;
-    }
-
-    fn startsWith(self: *Parser, prefix: []const u8) bool {
-        return std.mem.startsWith(u8, self.input[self.pos..], prefix);
-    }
-
-    fn skipWhitespace(self: *Parser) void {
-        while (self.peek()) |c| {
-            if (c == ' ' or c == '\t') _ = self.advance() else break;
-        }
-    }
-
-    fn skipComment(self: *Parser) void {
-        if (self.peek() == '#') {
-            while (self.peek()) |c| {
-                if (c == '\n') break;
-                _ = self.advance();
-            }
-        }
-    }
-
-    fn skipWhitespaceAndNewlines(self: *Parser) void {
-        while (self.peek()) |c| {
-            if (c == ' ' or c == '\t' or c == '\n' or c == '\r') {
-                _ = self.advance();
-            } else if (c == '#') {
-                self.skipComment();
-            } else break;
-        }
-    }
-
-    fn consumeNewlineOrEof(self: *Parser) !void {
-        self.skipWhitespace();
-        self.skipComment();
-        if (self.peek()) |c| {
-            if (c == '\n') {
-                _ = self.advance();
-            } else if (c == '\r') {
-                _ = self.advance();
-                if (self.peek() == '\n') _ = self.advance();
-            } else {
-                self.fillDiagnostic("expected newline or end of file");
-                return error.UnexpectedChar;
-            }
-        }
-    }
-
-    fn fillDiagnostic(self: *Parser, message: []const u8) void {
-        const diag = self.diag orelse return;
-        var line: usize = 1;
-        var col: usize = 1;
-        for (self.input[0..self.pos]) |c| {
-            if (c == '\n') {
-                line += 1;
-                col = 1;
-            } else {
-                col += 1;
-            }
-        }
-        diag.* = .{ .line = line, .col = col, .message = message };
-    }
-
-    // ---- top-level parse ----
-
-    fn parse(self: *Parser) !TOMLTable {
-        var rootMap = std.StringHashMap(TOMLValue).init(self.allocator);
-        try rootMap.ensureTotalCapacity(8);
-        var definedTables = std.StringHashMap(void).init(self.allocator);
-        try definedTables.ensureTotalCapacity(8);
-
-        // Array-of-tables storage
-        const AotEntry = struct {
-            keys: [][]const u8,
-            tables: std.ArrayListUnmanaged(std.StringHashMap(TOMLValue)),
-        };
-        var aotEntries: std.ArrayListUnmanaged(AotEntry) = .empty;
-
-        self.skipWhitespaceAndNewlines();
-
-        // Root key-value pairs (before any [section])
-        while (self.peek() != null and self.peek() != '[') {
-            try self.parseKeyValueInto(&rootMap);
-            self.skipWhitespaceAndNewlines();
-        }
-
-        // Table / array-of-table sections
-        while (self.peek() == '[') {
-            const isAot = self.pos + 1 < self.input.len and self.input[self.pos + 1] == '[';
-
-            if (isAot) {
-                // [[array]] header
-                self.pos += 2; // consume [[
-                self.skipWhitespace();
-                const keys = try self.parseDottedKey();
-                self.skipWhitespace();
-                if (!self.startsWith("]]")) {
-                    self.fillDiagnostic("expected ']]' to close array table header");
-                    return error.UnexpectedChar;
-                }
-                self.pos += 2; // consume ]]
-
-                // Find or create AotEntry for these keys
-                var found: ?*AotEntry = null;
-                for (aotEntries.items) |*e| {
-                    if (e.keys.len == keys.len) {
-                        var match = true;
-                        for (e.keys, keys) |a, b| {
-                            if (!std.mem.eql(u8, a, b)) {
-                                match = false;
-                                break;
-                            }
-                        }
-                        if (match) {
-                            found = e;
-                            break;
-                        }
-                    }
-                }
-                if (found == null) {
-                    try aotEntries.append(self.allocator, .{ .keys = keys, .tables = .empty });
-                    found = &aotEntries.items[aotEntries.items.len - 1];
-                }
-
-                var newMap = std.StringHashMap(TOMLValue).init(self.allocator);
-                try newMap.ensureTotalCapacity(8);
-                try found.?.tables.append(self.allocator, newMap);
-                const current = &found.?.tables.items[found.?.tables.items.len - 1];
-
-                try self.consumeNewlineOrEof();
-                self.skipWhitespaceAndNewlines();
-                while (self.peek() != null and self.peek() != '[') {
-                    try self.parseKeyValueInto(current);
-                    self.skipWhitespaceAndNewlines();
-                }
-            } else {
-                // [table] header
-                self.pos += 1; // consume [
-                self.skipWhitespace();
-                const keys = try self.parseDottedKey();
-                self.skipWhitespace();
-
-                if (self.peek() != ']') {
-                    self.fillDiagnostic("expected ']' to close table header");
-                    return error.UnexpectedChar;
-                }
-                self.pos += 1; // consume ]
-
-                const path = try std.mem.join(self.allocator, ".", keys);
-                if (definedTables.contains(path)) {
-                    self.fillDiagnostic("duplicate table definition");
-                    return error.DuplicateKey;
-                }
-                try definedTables.put(path, {});
-
-                var target = &rootMap;
-                for (keys) |k| {
-                    const entry = try target.getOrPut(k);
-                    if (!entry.found_existing) {
-                        var inner = std.StringHashMap(TOMLValue).init(self.allocator);
-                        try inner.ensureTotalCapacity(8);
-                        entry.value_ptr.* = .{ .table = tableFromMap(inner) };
-                    }
-                    switch (entry.value_ptr.*) {
-                        .table => |*t| target = &t.inner,
-                        else => {
-                            self.fillDiagnostic("cannot create table: key already exists as non-table");
-                            return error.DuplicateKey;
-                        },
-                    }
-                }
-
-                try self.consumeNewlineOrEof();
-                self.skipWhitespaceAndNewlines();
-                while (self.peek() != null and self.peek() != '[') {
-                    try self.parseKeyValueInto(target);
-                    self.skipWhitespaceAndNewlines();
-                }
-            }
-        }
-
-        // Finalize array-of-tables: convert accumulated maps to immutable arrays
-        for (aotEntries.items) |*entry| {
-            const arr = try self.allocator.alloc(TOMLValue, entry.tables.items.len);
-            for (entry.tables.items, 0..) |map, i| arr[i] = .{ .table = tableFromMap(map) };
-
-            var target = &rootMap;
-            for (entry.keys[0 .. entry.keys.len - 1]) |k| {
-                const e = try target.getOrPut(k);
-                if (!e.found_existing) {
-                    var inner = std.StringHashMap(TOMLValue).init(self.allocator);
-                    try inner.ensureTotalCapacity(8);
-                    e.value_ptr.* = .{ .table = tableFromMap(inner) };
-                }
-                switch (e.value_ptr.*) {
-                    .table => |*t| target = &t.inner,
-                    else => {
-                        self.fillDiagnostic("cannot finalize array table");
-                        return error.DuplicateKey;
-                    },
-                }
-            }
-            const last = entry.keys[entry.keys.len - 1];
-            if (target.contains(last)) {
-                self.fillDiagnostic("array table key conflicts with existing key");
-                return error.DuplicateKey;
-            }
-            try target.put(last, .{ .array = arr });
-        }
-
-        return tableFromMap(rootMap);
-    }
-
-    // ---- key parsing ----
-
-    fn parseSingleKey(self: *Parser) ![]const u8 {
-        const c = self.peek() orelse {
-            self.fillDiagnostic("expected key");
-            return error.UnexpectedEof;
-        };
-        if (c == '"') return try self.parseBasicString();
-        if (c == '\'') return try self.parseLiteralString();
-        // bare key
-        const start = self.pos;
-        while (self.peek()) |ch| {
-            if (std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '-') {
-                _ = self.advance();
-            } else break;
-        }
-        if (self.pos == start) {
-            self.fillDiagnostic("expected bare key");
-            return error.UnexpectedChar;
-        }
-        return self.input[start..self.pos];
-    }
-
-    fn parseDottedKey(self: *Parser) ![][]const u8 {
-        var keys: std.ArrayListUnmanaged([]const u8) = .empty;
-        try keys.append(self.allocator, try self.parseSingleKey());
-        while (true) {
-            self.skipWhitespace();
-            if (self.peek() != '.') break;
-            _ = self.advance(); // consume '.'
-            self.skipWhitespace();
-            try keys.append(self.allocator, try self.parseSingleKey());
-        }
-        return try keys.toOwnedSlice(self.allocator);
-    }
-
-    fn parseKeyValueInto(self: *Parser, map: *std.StringHashMap(TOMLValue)) !void {
-        const keys = try self.parseDottedKey();
-        self.skipWhitespace();
-
-        if (self.peek() != '=') {
-            self.fillDiagnostic("expected '=' after key");
-            return error.UnexpectedChar;
-        }
-        _ = self.advance();
-        self.skipWhitespace();
-
-        const value = try self.parseValue();
-
-        // Navigate intermediate tables for dotted keys
-        var target = map;
-        for (keys[0 .. keys.len - 1]) |k| {
-            const entry = try target.getOrPut(k);
-            if (!entry.found_existing) {
-                var inner = std.StringHashMap(TOMLValue).init(self.allocator);
-                try inner.ensureTotalCapacity(4);
-                entry.value_ptr.* = .{ .table = tableFromMap(inner) };
-            }
-            switch (entry.value_ptr.*) {
-                .table => |*t| target = &t.inner,
-                else => {
-                    self.fillDiagnostic("cannot create intermediate table: key exists as non-table");
-                    return error.DuplicateKey;
-                },
-            }
-        }
-        const lastKey = keys[keys.len - 1];
-        if (target.contains(lastKey)) {
-            self.fillDiagnostic("duplicate key");
-            return error.DuplicateKey;
-        }
-        try target.put(lastKey, value);
-
-        try self.consumeNewlineOrEof();
-    }
-
-    // ---- value parsing ----
-
-    fn parseValue(self: *Parser) Error!TOMLValue {
-        const c = self.peek() orelse {
-            self.fillDiagnostic("unexpected end of input");
-            return error.UnexpectedEof;
-        };
-        return switch (c) {
-            '"' => blk: {
-                if (self.startsWith("\"\"\"")) {
-                    break :blk .{ .string = try self.parseMultilineBasicString() };
-                }
-                break :blk .{ .string = try self.parseBasicString() };
+test "parse: success: key syntax and comments" {
+    const test_cases = [_]struct {
+        name: []const u8,
+        input: struct { src: []const u8, key: []const u8 },
+        expected: i64,
+    }{
+        .{
+            .name = "unicode key",
+            .input = .{
+                .src = "café = 42",
+                .key = "café",
             },
-            '\'' => blk: {
-                if (self.startsWith("'''")) {
-                    break :blk .{ .string = try self.parseMultilineLiteralString() };
-                }
-                break :blk .{ .string = try self.parseLiteralString() };
+            .expected = 42,
+        },
+        .{
+            .name = "inline comment",
+            .input = .{
+                .src = "port = 8080 # server port\n",
+                .key = "port",
             },
-            't', 'f' => try self.parseBoolean(),
-            '0'...'9' => blk: {
-                if (self.isDateLike()) break :blk try self.parseDateOrDateTime();
-                if (self.isTimeLike()) break :blk .{ .local_time = try self.parseLocalTime() };
-                break :blk try self.parseNumber();
+            .expected = 8080,
+        },
+        .{
+            .name = "quoted key",
+            .input = .{
+                .src = "\"my-key\" = 42\n",
+                .key = "my-key",
             },
-            '-', '+', 'i', 'n' => try self.parseNumber(),
-            '[' => try self.parseArray(),
-            '{' => try self.parseInlineTable(),
-            else => {
-                self.fillDiagnostic("unexpected character in value");
-                return error.UnexpectedChar;
+            .expected = 42,
+        },
+        .{
+            .name = "leading comments",
+            .input = .{
+                .src = "\n# top-level comment\n# another comment\n\nkey = 42",
+                .key = "key",
             },
-        };
-    }
-
-    // ---- string parsing ----
-
-    fn parseBasicString(self: *Parser) ![]const u8 {
-        _ = self.advance(); // consume '"'
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
-        while (true) {
-            const c = self.peek() orelse {
-                self.fillDiagnostic("unterminated string");
-                return error.UnexpectedEof;
-            };
-            if (c == '"') {
-                _ = self.advance();
-                break;
-            } else if (c == '\\') {
-                _ = self.advance();
-                try self.parseEscapeSequence(&buf);
-            } else if (c == '\n' or c == '\r') {
-                self.fillDiagnostic("newline not allowed in basic string");
-                return error.UnexpectedChar;
-            } else {
-                _ = self.advance();
-                try buf.append(self.allocator, c);
-            }
-        }
-        return try buf.toOwnedSlice(self.allocator);
-    }
-
-    fn parseMultilineBasicString(self: *Parser) ![]const u8 {
-        self.pos += 3; // consume """
-        if (self.peek() == '\n') {
-            _ = self.advance();
-        } else if (self.peek() == '\r') {
-            _ = self.advance();
-            if (self.peek() == '\n') _ = self.advance();
-        }
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
-        while (true) {
-            const c = self.peek() orelse {
-                self.fillDiagnostic("unterminated multiline basic string");
-                return error.UnexpectedEof;
-            };
-            if (c == '"') {
-                var qcount: usize = 0;
-                while (self.peek() == '"') {
-                    qcount += 1;
-                    _ = self.advance();
-                }
-                if (qcount >= 3) {
-                    const trailing = qcount - 3;
-                    for (0..trailing) |_| try buf.append(self.allocator, '"');
-                    break;
-                }
-                for (0..qcount) |_| try buf.append(self.allocator, '"');
-            } else if (c == '\\') {
-                _ = self.advance();
-                // line-ending backslash
-                if (self.peek()) |esc| {
-                    if (esc == '\n' or esc == '\r' or esc == ' ' or esc == '\t') {
-                        while (self.peek()) |ws| {
-                            if (ws == ' ' or ws == '\t' or ws == '\n' or ws == '\r') {
-                                _ = self.advance();
-                            } else break;
-                        }
-                        continue;
-                    }
-                }
-                try self.parseEscapeSequence(&buf);
-            } else {
-                _ = self.advance();
-                try buf.append(self.allocator, c);
-            }
-        }
-        return try buf.toOwnedSlice(self.allocator);
-    }
-
-    // 元の入力スライスをそのまま返すためアロケーションが発生しない。
-    fn parseLiteralString(self: *Parser) ![]const u8 {
-        _ = self.advance(); // consume "'"
-        const start = self.pos;
-        while (self.peek()) |c| {
-            if (c == '\'') {
-                const s = self.input[start..self.pos];
-                _ = self.advance();
-                return s;
-            } else if (c == '\n' or c == '\r') {
-                self.fillDiagnostic("unterminated literal string");
-                return error.UnexpectedChar;
-            }
-            _ = self.advance();
-        }
-        self.fillDiagnostic("unterminated literal string");
-        return error.UnexpectedEof;
-    }
-
-    // 元の入力スライスをそのまま返すためアロケーションが発生しない。
-    fn parseMultilineLiteralString(self: *Parser) ![]const u8 {
-        self.pos += 3; // consume '''
-        if (self.peek() == '\n') {
-            _ = self.advance();
-        } else if (self.peek() == '\r') {
-            _ = self.advance();
-            if (self.peek() == '\n') _ = self.advance();
-        }
-        const start = self.pos;
-        while (true) {
-            if (self.pos >= self.input.len) {
-                self.fillDiagnostic("unterminated multiline literal string");
-                return error.UnexpectedEof;
-            }
-            if (self.input[self.pos] == '\'') {
-                const before = self.pos;
-                var qcount: usize = 0;
-                while (self.pos < self.input.len and self.input[self.pos] == '\'') {
-                    qcount += 1;
-                    self.pos += 1;
-                }
-                if (qcount >= 3) {
-                    return self.input[start .. before + (qcount - 3)];
-                }
-            } else {
-                self.pos += 1;
-            }
-        }
-    }
-
-    fn parseEscapeSequence(self: *Parser, buf: *std.ArrayListUnmanaged(u8)) !void {
-        const esc = self.peek() orelse {
-            self.fillDiagnostic("unexpected end of input after backslash");
-            return error.UnexpectedEof;
-        };
-        _ = self.advance();
-        switch (esc) {
-            'b' => try buf.append(self.allocator, 0x08),
-            't' => try buf.append(self.allocator, '\t'),
-            'n' => try buf.append(self.allocator, '\n'),
-            'f' => try buf.append(self.allocator, 0x0C),
-            'r' => try buf.append(self.allocator, '\r'),
-            'e' => try buf.append(self.allocator, 0x1B),
-            '"' => try buf.append(self.allocator, '"'),
-            '\\' => try buf.append(self.allocator, '\\'),
-            'x' => try appendUtf8Codepoint(buf, self.allocator, try self.parseHexCodepoint(2)),
-            'u' => try appendUtf8Codepoint(buf, self.allocator, try self.parseHexCodepoint(4)),
-            'U' => try appendUtf8Codepoint(buf, self.allocator, try self.parseHexCodepoint(8)),
-            else => {
-                self.fillDiagnostic("invalid escape sequence");
-                return error.InvalidEscape;
-            },
-        }
-    }
-
-    fn parseHexCodepoint(self: *Parser, n: usize) !u21 {
-        var value: u21 = 0;
-        for (0..n) |_| {
-            const h = self.peek() orelse {
-                self.fillDiagnostic("unexpected end of input in unicode escape");
-                return error.InvalidUnicode;
-            };
-            _ = self.advance();
-            const digit = std.fmt.charToDigit(h, 16) catch {
-                self.fillDiagnostic("invalid hex digit in unicode escape");
-                return error.InvalidUnicode;
-            };
-            value = value * 16 + digit;
-        }
-        if (!std.unicode.utf8ValidCodepoint(value)) {
-            self.fillDiagnostic("invalid unicode code point");
-            return error.InvalidUnicode;
-        }
-        return value;
-    }
-
-    // ---- boolean ----
-
-    fn parseBoolean(self: *Parser) !TOMLValue {
-        if (self.startsWith("true")) {
-            self.pos += 4;
-            return .{ .boolean = true };
-        }
-        if (self.startsWith("false")) {
-            self.pos += 5;
-            return .{ .boolean = false };
-        }
-        self.fillDiagnostic("expected 'true' or 'false'");
-        return error.UnexpectedChar;
-    }
-
-    // ---- numbers ----
-
-    fn parseNumber(self: *Parser) !TOMLValue {
-        const start = self.pos;
-        const hasSign = self.peek() == '+' or self.peek() == '-';
-        const isNegative = hasSign and self.input[self.pos] == '-';
-        if (hasSign) _ = self.advance();
-
-        if (self.startsWith("inf")) {
-            self.pos += 3;
-            return .{ .float = if (isNegative) -std.math.inf(f64) else std.math.inf(f64) };
-        }
-        if (self.startsWith("nan")) {
-            self.pos += 3;
-            return .{ .float = std.math.nan(f64) };
-        }
-
-        if (!hasSign) {
-            if (self.startsWith("0x")) {
-                self.pos += 2;
-                return try self.parseBasedInt(16);
-            }
-            if (self.startsWith("0o")) {
-                self.pos += 2;
-                return try self.parseBasedInt(8);
-            }
-            if (self.startsWith("0b")) {
-                self.pos += 2;
-                return try self.parseBasedInt(2);
-            }
-        }
-
-        const digitsStart = self.pos;
-        while (self.peek()) |c| {
-            if (std.ascii.isDigit(c) or c == '_') _ = self.advance() else break;
-        }
-        if (self.pos == digitsStart) {
-            self.fillDiagnostic("expected digit");
-            return error.UnexpectedChar;
-        }
-
-        // float detection
-        if (self.peek() == '.' or self.peek() == 'e' or self.peek() == 'E') {
-            if (self.peek() == '.') {
-                _ = self.advance();
-                const firstDigit = self.peek() orelse {
-                    self.fillDiagnostic("expected digit after decimal point");
-                    return error.InvalidNumber;
-                };
-                if (!std.ascii.isDigit(firstDigit)) {
-                    self.fillDiagnostic("expected digit after decimal point");
-                    return error.InvalidNumber;
-                }
-                while (self.peek()) |c| {
-                    if (std.ascii.isDigit(c) or c == '_') _ = self.advance() else break;
-                }
-            }
-            if (self.peek() == 'e' or self.peek() == 'E') {
-                _ = self.advance();
-                if (self.peek() == '+' or self.peek() == '-') _ = self.advance();
-                const expStart = self.pos;
-                while (self.peek()) |c| {
-                    if (std.ascii.isDigit(c)) _ = self.advance() else break;
-                }
-                if (self.pos == expStart) {
-                    self.fillDiagnostic("expected digit in exponent");
-                    return error.InvalidNumber;
-                }
-            }
-            const raw = self.input[start..self.pos];
-            const f = try parseFloatStrip(self.allocator, raw) orelse {
-                self.fillDiagnostic("invalid float");
-                return error.InvalidNumber;
-            };
-            return .{ .float = f };
-        }
-
-        // integer
-        const raw = self.input[start..self.pos];
-        const intDigits = if (hasSign) raw[1..] else raw;
-        try validateUnderscores(intDigits, self);
-        var stripped = try parseIntStrip(self.allocator, raw);
-        defer stripped.deinit(self.allocator);
-        const n = std.fmt.parseInt(i64, stripped.items, 10) catch {
-            self.fillDiagnostic("invalid integer");
-            return error.InvalidNumber;
-        };
-        return .{ .integer = n };
-    }
-
-    fn parseBasedInt(self: *Parser, base: u8) !TOMLValue {
-        const start = self.pos;
-        while (self.peek()) |c| {
-            if (std.ascii.isHex(c) or c == '_') _ = self.advance() else break;
-        }
-        if (self.pos == start) {
-            self.fillDiagnostic("expected digit in based integer");
-            return error.InvalidNumber;
-        }
-        const raw = self.input[start..self.pos];
-        try validateUnderscores(raw, self);
-        var stripped = try parseIntStrip(self.allocator, raw);
-        defer stripped.deinit(self.allocator);
-        const n = std.fmt.parseInt(i64, stripped.items, base) catch {
-            self.fillDiagnostic("invalid based integer");
-            return error.InvalidNumber;
-        };
-        return .{ .integer = n };
-    }
-
-    // ---- datetime ----
-
-    fn isDateLike(self: *Parser) bool {
-        const r = self.input[self.pos..];
-        if (r.len < 10) return false;
-        for (0..4) |i| if (!std.ascii.isDigit(r[i])) return false;
-        if (r[4] != '-') return false;
-        for (5..7) |i| if (!std.ascii.isDigit(r[i])) return false;
-        if (r[7] != '-') return false;
-        for (8..10) |i| if (!std.ascii.isDigit(r[i])) return false;
-        return true;
-    }
-
-    fn isTimeLike(self: *Parser) bool {
-        const r = self.input[self.pos..];
-        // HH:MM is the minimum (TOML v1.1.0 allows omitting seconds)
-        if (r.len < 5) return false;
-        for (0..2) |i| if (!std.ascii.isDigit(r[i])) return false;
-        if (r[2] != ':') return false;
-        for (3..5) |i| if (!std.ascii.isDigit(r[i])) return false;
-        return true;
-    }
-
-    fn parseDigits(self: *Parser, n: usize) !u32 {
-        var value: u32 = 0;
-        for (0..n) |_| {
-            const c = self.peek() orelse {
-                self.fillDiagnostic("unexpected end of input in date/time");
-                return error.InvalidDate;
-            };
-            if (!std.ascii.isDigit(c)) {
-                self.fillDiagnostic("expected digit in date/time");
-                return error.InvalidDate;
-            }
-            _ = self.advance();
-            value = value * 10 + (c - '0');
-        }
-        return value;
-    }
-
-    fn parseLocalDate(self: *Parser) !types.LocalDate {
-        const year = try self.parseDigits(4);
-        if (self.peek() != '-') {
-            self.fillDiagnostic("expected '-' in date");
-            return error.InvalidDate;
-        }
-        _ = self.advance();
-        const month = try self.parseDigits(2);
-        if (self.peek() != '-') {
-            self.fillDiagnostic("expected '-' in date");
-            return error.InvalidDate;
-        }
-        _ = self.advance();
-        const day = try self.parseDigits(2);
-
-        if (month < 1 or month > 12) {
-            self.fillDiagnostic("invalid month");
-            return error.InvalidDate;
-        }
-        const maxDay = daysInMonth(month, year);
-        if (day < 1 or day > maxDay) {
-            self.fillDiagnostic("invalid day");
-            return error.InvalidDate;
-        }
-
-        return .{ .year = @intCast(year), .month = @intCast(month), .day = @intCast(day) };
-    }
-
-    fn parseLocalTime(self: *Parser) !types.LocalTime {
-        const hour = try self.parseDigits(2);
-        if (self.peek() != ':') {
-            self.fillDiagnostic("expected ':' in time");
-            return error.InvalidTime;
-        }
-        _ = self.advance();
-        const minute = try self.parseDigits(2);
-
-        // seconds are optional (TOML v1.1.0)
-        if (self.peek() != ':') {
-            if (hour > 23) {
-                self.fillDiagnostic("invalid hour");
-                return error.InvalidTime;
-            }
-            if (minute > 59) {
-                self.fillDiagnostic("invalid minute");
-                return error.InvalidTime;
-            }
-            return .{ .hour = @intCast(hour), .minute = @intCast(minute), .second = 0, .nanosecond = 0 };
-        }
-        _ = self.advance();
-        const second = try self.parseDigits(2);
-
-        if (hour > 23) {
-            self.fillDiagnostic("invalid hour");
-            return error.InvalidTime;
-        }
-        if (minute > 59) {
-            self.fillDiagnostic("invalid minute");
-            return error.InvalidTime;
-        }
-        if (second > 60) {
-            self.fillDiagnostic("invalid second");
-            return error.InvalidTime;
-        }
-
-        var nanosecond: u32 = 0;
-        if (self.peek() == '.') {
-            _ = self.advance();
-            const fracStart = self.pos;
-            while (self.peek()) |c| {
-                if (std.ascii.isDigit(c)) _ = self.advance() else break;
-            }
-            const frac = self.input[fracStart..self.pos];
-            if (frac.len == 0) {
-                self.fillDiagnostic("expected fractional digits");
-                return error.InvalidTime;
-            }
-            var ns: u64 = 0;
-            const n = @min(frac.len, 9);
-            for (frac[0..n]) |c| ns = ns * 10 + (c - '0');
-            for (0..(9 - n)) |_| ns *= 10;
-            nanosecond = @intCast(ns);
-        }
-
-        return .{
-            .hour = @intCast(hour),
-            .minute = @intCast(minute),
-            .second = @intCast(second),
-            .nanosecond = nanosecond,
-        };
-    }
-
-    fn parseDateOrDateTime(self: *Parser) !TOMLValue {
-        const date = try self.parseLocalDate();
-
-        const isDatetime = blk: {
-            if (self.peek()) |sep| {
-                if (sep == 'T' or sep == 't') break :blk true;
-                // space separator: next char must be a digit (HH of time)
-                if (sep == ' ' and self.pos + 1 < self.input.len and
-                    std.ascii.isDigit(self.input[self.pos + 1])) break :blk true;
-            }
-            break :blk false;
-        };
-
-        if (!isDatetime) return .{ .local_date = date };
-
-        _ = self.advance(); // consume T/t or space
-        const time = try self.parseLocalTime();
-
-        // optional timezone offset
-        if (self.peek() == 'Z' or self.peek() == 'z') {
-            _ = self.advance();
-            return .{ .offset_date_time = .{
-                .datetime = .{ .date = date, .time = time },
-                .offset_minutes = 0,
-            } };
-        }
-        if (self.peek() == '+' or self.peek() == '-') {
-            const neg = self.advance().? == '-';
-            const offH = try self.parseDigits(2);
-            if (self.peek() != ':') {
-                self.fillDiagnostic("expected ':' in tz offset");
-                return error.InvalidTime;
-            }
-            _ = self.advance();
-            const offM = try self.parseDigits(2);
-            const offset: i16 = @intCast(offH * 60 + offM);
-            return .{ .offset_date_time = .{
-                .datetime = .{ .date = date, .time = time },
-                .offset_minutes = if (neg) -offset else offset,
-            } };
-        }
-
-        return .{ .local_date_time = .{ .date = date, .time = time } };
-    }
-
-    // ---- array ----
-
-    fn parseArray(self: *Parser) Error!TOMLValue {
-        _ = self.advance(); // consume '['
-        var items: std.ArrayListUnmanaged(TOMLValue) = .empty;
-
-        self.skipWhitespaceAndNewlines();
-        if (self.peek() == ']') {
-            _ = self.advance();
-            return .{ .array = try items.toOwnedSlice(self.allocator) };
-        }
-
-        while (true) {
-            self.skipWhitespaceAndNewlines();
-            const item = try self.parseValue();
-            try items.append(self.allocator, item);
-            self.skipWhitespaceAndNewlines();
-
-            if (self.peek() == ']') {
-                _ = self.advance();
-                break;
-            }
-            if (self.peek() != ',') {
-                self.fillDiagnostic("expected ',' or ']' in array");
-                return error.UnexpectedChar;
-            }
-            _ = self.advance(); // consume ','
-            self.skipWhitespaceAndNewlines();
-            // trailing comma allowed
-            if (self.peek() == ']') {
-                _ = self.advance();
-                break;
-            }
-        }
-        return .{ .array = try items.toOwnedSlice(self.allocator) };
-    }
-
-    // ---- inline table ----
-
-    fn parseInlineTable(self: *Parser) Error!TOMLValue {
-        _ = self.advance(); // consume '{'
-        var map = std.StringHashMap(TOMLValue).init(self.allocator);
-        try map.ensureTotalCapacity(4);
-
-        self.skipWhitespaceAndNewlines();
-        if (self.peek() == '}') {
-            _ = self.advance();
-            return .{ .table = tableFromMap(map) };
-        }
-
-        while (true) {
-            self.skipWhitespaceAndNewlines();
-            const keys = try self.parseDottedKey();
-            self.skipWhitespaceAndNewlines();
-
-            if (self.peek() != '=') {
-                self.fillDiagnostic("expected '=' in inline table");
-                return error.UnexpectedChar;
-            }
-            _ = self.advance();
-            self.skipWhitespaceAndNewlines();
-
-            const value = try self.parseValue();
-
-            var target = &map;
-            for (keys[0 .. keys.len - 1]) |k| {
-                const entry = try target.getOrPut(k);
-                if (!entry.found_existing) {
-                    var inner = std.StringHashMap(TOMLValue).init(self.allocator);
-                    try inner.ensureTotalCapacity(4);
-                    entry.value_ptr.* = .{ .table = tableFromMap(inner) };
-                }
-                switch (entry.value_ptr.*) {
-                    .table => |*t| target = &t.inner,
-                    else => return error.DuplicateKey,
-                }
-            }
-            const last = keys[keys.len - 1];
-            if (target.contains(last)) {
-                self.fillDiagnostic("duplicate key in inline table");
-                return error.DuplicateKey;
-            }
-            try target.put(last, value);
-
-            self.skipWhitespaceAndNewlines();
-            if (self.peek() == '}') {
-                _ = self.advance();
-                break;
-            }
-            if (self.peek() != ',') {
-                self.fillDiagnostic("expected ',' or '}' in inline table");
-                return error.UnexpectedChar;
-            }
-            _ = self.advance(); // consume ','
-            self.skipWhitespaceAndNewlines();
-            // trailing comma (TOML 1.1)
-            if (self.peek() == '}') {
-                _ = self.advance();
-                break;
-            }
-        }
-        return .{ .table = tableFromMap(map) };
-    }
-};
-
-// ============================================================
-// Helpers
-// ============================================================
-
-fn daysInMonth(month: u32, year: u32) u32 {
-    return switch (month) {
-        1, 3, 5, 7, 8, 10, 12 => 31,
-        4, 6, 9, 11 => 30,
-        2 => if (isLeapYear(year)) @as(u32, 29) else @as(u32, 28),
-        else => 0,
+            .expected = 42,
+        },
     };
-}
 
-fn isLeapYear(year: u32) bool {
-    return (year % 4 == 0 and year % 100 != 0) or (year % 400 == 0);
-}
+    for (test_cases) |tc| {
+        errdefer std.debug.print("FAIL: {s}\n", .{tc.name});
 
-fn appendUtf8Codepoint(buf: *std.ArrayListUnmanaged(u8), allocator: Allocator, cp: u21) !void {
-    var tmp: [4]u8 = undefined;
-    const len = std.unicode.utf8Encode(cp, &tmp) catch return error.InvalidUnicode;
-    try buf.appendSlice(allocator, tmp[0..len]);
-}
-
-fn validateUnderscores(s: []const u8, parser: *Parser) !void {
-    if (s.len == 0) return;
-    if (s[0] == '_') {
-        parser.fillDiagnostic("leading underscore in number");
-        return error.InvalidNumber;
-    }
-    if (s[s.len - 1] == '_') {
-        parser.fillDiagnostic("trailing underscore in number");
-        return error.InvalidNumber;
-    }
-    for (s, 0..) |c, i| {
-        if (c == '_' and i + 1 < s.len and s[i + 1] == '_') {
-            parser.fillDiagnostic("consecutive underscores in number");
-            return error.InvalidNumber;
-        }
-    }
-}
-
-fn parseIntStrip(allocator: Allocator, raw: []const u8) !std.ArrayListUnmanaged(u8) {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    for (raw) |c| {
-        if (c != '_') try buf.append(allocator, c);
-    }
-    return buf;
-}
-
-fn parseFloatStrip(allocator: Allocator, raw: []const u8) !?f64 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer buf.deinit(allocator);
-    for (raw) |c| {
-        if (c != '_') try buf.append(allocator, c);
-    }
-    return std.fmt.parseFloat(f64, buf.items) catch null;
-}
-
-// ============================================================
-// Tests
-// ============================================================
-
-test "parseKey: bare key alphanumeric" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var parser = Parser.init(arena.allocator(), "my_key-1 = 1", .{});
-    const key = try parser.parseSingleKey();
-    try std.testing.expectEqualStrings("my_key-1", key);
-}
-
-test "parseKey: error on empty" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var parser = Parser.init(arena.allocator(), "= 1", .{});
-    try std.testing.expectError(error.UnexpectedChar, parser.parseSingleKey());
-}
-
-test "parseValue: integer positive" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var parser = Parser.init(arena.allocator(), "42", .{});
-    const val = try parser.parseValue();
-    try std.testing.expectEqual(TOMLValue{ .integer = 42 }, val);
-}
-
-test "parseValue: integer negative" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var parser = Parser.init(arena.allocator(), "-5", .{});
-    const val = try parser.parseValue();
-    try std.testing.expectEqual(TOMLValue{ .integer = -5 }, val);
-}
-
-test "parseValue: boolean true/false" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var p1 = Parser.init(arena.allocator(), "true", .{});
-    try std.testing.expectEqual(TOMLValue{ .boolean = true }, try p1.parseValue());
-    var p2 = Parser.init(arena.allocator(), "false", .{});
-    try std.testing.expectEqual(TOMLValue{ .boolean = false }, try p2.parseValue());
-}
-
-test "parseValue: basic string" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var parser = Parser.init(arena.allocator(), "\"hello\"", .{});
-    const val = try parser.parseValue();
-    try std.testing.expectEqualStrings("hello", val.string);
-}
-
-test "parseValue: basic string with escapes" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var parser = Parser.init(arena.allocator(), "\"hello\\nworld\\t!\"", .{});
-    const val = try parser.parseValue();
-    try std.testing.expectEqualStrings("hello\nworld\t!", val.string);
-}
-
-test "parseFromSlice: basic key-value pairs" {
-    const input =
-        \\name = "Alice"
-        \\age = 30
-        \\active = true
-        \\negative = -5
-    ;
-    var result = try parseFromSlice(std.testing.allocator, input, .{});
-    defer result.deinit();
-
-    const name = result.value.get("name") orelse return error.TestFailed;
-    try std.testing.expectEqualStrings("Alice", name.string);
-    const age = result.value.get("age") orelse return error.TestFailed;
-    try std.testing.expectEqual(@as(i64, 30), age.integer);
-    const active = result.value.get("active") orelse return error.TestFailed;
-    try std.testing.expectEqual(true, active.boolean);
-    const negative = result.value.get("negative") orelse return error.TestFailed;
-    try std.testing.expectEqual(@as(i64, -5), negative.integer);
-}
-
-test "parseFromSlice: inline comment" {
-    var result = try parseFromSlice(std.testing.allocator, "port = 8080 # server port\n", .{});
-    defer result.deinit();
-    const port = result.value.get("port") orelse return error.TestFailed;
-    try std.testing.expectEqual(@as(i64, 8080), port.integer);
-}
-
-test "parseFromSlice: error on missing value" {
-    try std.testing.expectError(error.UnexpectedEof, parseFromSlice(std.testing.allocator, "key = ", .{}));
-}
-
-test "parseFromSlice: error on unquoted string value" {
-    try std.testing.expectError(error.UnexpectedChar, parseFromSlice(std.testing.allocator, "key = value", .{}));
-}
-
-test "parseFromSlice: duplicate key error" {
-    try std.testing.expectError(error.DuplicateKey, parseFromSlice(std.testing.allocator, "a = 1\na = 2", .{}));
-}
-
-test "parseFromSlice: diagnostic on error" {
-    var diag = Diagnostic{};
-    try std.testing.expectError(error.UnexpectedEof, parseFromSlice(std.testing.allocator, "key = ", .{ .diag = &diag }));
-    try std.testing.expect(diag.line > 0);
-    try std.testing.expect(diag.message.len > 0);
-}
-
-// ============================================================
-
-test "parseValue: all basic escape sequences" {
-    const cases = [_]struct { input: []const u8, expected: []const u8 }{
-        .{ .input = "\"\\b\"", .expected = "\x08" },
-        .{ .input = "\"\\t\"", .expected = "\t" },
-        .{ .input = "\"\\n\"", .expected = "\n" },
-        .{ .input = "\"\\f\"", .expected = "\x0C" },
-        .{ .input = "\"\\r\"", .expected = "\r" },
-        .{ .input = "\"\\e\"", .expected = "\x1B" },
-        .{ .input = "\"\\\"\"", .expected = "\"" },
-        .{ .input = "\"\\\\\"", .expected = "\\" },
-    };
-    for (cases) |c| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
-        var parser = Parser.init(arena.allocator(), c.input, .{});
-        const val = try parser.parseValue();
-        try std.testing.expectEqualStrings(c.expected, val.string);
+        const table = try parse(&arena, tc.input.src, .{});
+        const val_opt = table.get(tc.input.key);
+        // どのテストケースが失敗したか特定するため
+        // expect で null チェックし、.? で安全に unwrap する
+        try std.testing.expect(val_opt != null);
+        try std.testing.expectEqual(tc.expected, val_opt.?.integer);
     }
 }
 
-test "parseValue: unicode escape \\uHHHH" {
+test "parse: success: multiple types: string" {
+    const input =
+        \\name     = "Alice"
+        \\age      = 30
+        \\active   = true
+        \\inactive = false
+        \\negative = -5
+    ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var parser = Parser.init(arena.allocator(), "\"\\u0041\"", .{});
-    const val = try parser.parseValue();
-    try std.testing.expectEqualStrings("A", val.string);
+    const table = try parse(&arena, input, .{});
+    const val = table.get("name") orelse return error.TestFailed;
+    try std.testing.expectEqualStrings("Alice", val.string);
 }
 
-test "parseValue: unicode escape \\UHHHHHHHH" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var parser = Parser.init(arena.allocator(), "\"\\U0001F600\"", .{});
-    const val = try parser.parseValue();
-    try std.testing.expectEqualStrings("😀", val.string);
+test "parse: success: multiple types: integer and boolean" {
+    const input =
+        \\name     = "Alice"
+        \\age      = 30
+        \\active   = true
+        \\inactive = false
+        \\negative = -5
+    ;
+    const test_cases = [_]struct {
+        name: []const u8,
+        input: []const u8,
+        expected: Value,
+    }{
+        .{ .name = "age", .input = "age", .expected = .{ .integer = 30 } },
+        .{ .name = "active", .input = "active", .expected = .{ .boolean = true } },
+        .{ .name = "inactive", .input = "inactive", .expected = .{ .boolean = false } },
+        .{ .name = "negative", .input = "negative", .expected = .{ .integer = -5 } },
+    };
+
+    for (test_cases) |tc| {
+        errdefer std.debug.print("FAIL: {s}\n", .{tc.name});
+
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const table = try parse(&arena, input, .{});
+        const val_opt = table.get(tc.input);
+        // どのテストケースが失敗したか特定するため
+        // expect で null チェックし、.? で安全に unwrap する
+        try std.testing.expect(val_opt != null);
+        try std.testing.expectEqual(tc.expected, val_opt.?);
+    }
 }
 
-test "parseValue: invalid escape error" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var parser = Parser.init(arena.allocator(), "\"\\q\"", .{});
-    try std.testing.expectError(error.InvalidEscape, parser.parseValue());
-}
-
-test "parseValue: invalid unicode short error" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var parser = Parser.init(arena.allocator(), "\"\\u00\"", .{});
-    try std.testing.expectError(error.InvalidUnicode, parser.parseValue());
-}
-
-test "parseValue: multiline basic string" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var parser = Parser.init(arena.allocator(), "\"\"\"multi\nline\"\"\"", .{});
-    const val = try parser.parseValue();
-    try std.testing.expectEqualStrings("multi\nline", val.string);
-}
-
-test "parseValue: multiline basic string trims first newline" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var parser = Parser.init(arena.allocator(), "\"\"\"\nhello\"\"\"", .{});
-    const val = try parser.parseValue();
-    try std.testing.expectEqualStrings("hello", val.string);
-}
-
-test "parseValue: multiline basic string line continuation" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var parser = Parser.init(arena.allocator(), "\"\"\"hello \\\n  world\"\"\"", .{});
-    const val = try parser.parseValue();
-    try std.testing.expectEqualStrings("hello world", val.string);
-}
-
-test "parseValue: literal string zero-copy" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var parser = Parser.init(arena.allocator(), "'C:\\Users\\tom'", .{});
-    const val = try parser.parseValue();
-    try std.testing.expectEqualStrings("C:\\Users\\tom", val.string);
-}
-
-test "parseValue: multiline literal string" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var parser = Parser.init(arena.allocator(), "'''\nline1\nline2'''", .{});
-    const val = try parser.parseValue();
-    try std.testing.expectEqualStrings("line1\nline2", val.string);
-}
-
-test "parseValue: integer underscore" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var parser = Parser.init(arena.allocator(), "1_000_000", .{});
-    const val = try parser.parseValue();
-    try std.testing.expectEqual(TOMLValue{ .integer = 1_000_000 }, val);
-}
-
-test "parseValue: integer hex" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var parser = Parser.init(arena.allocator(), "0xDEAD_BEEF", .{});
-    const val = try parser.parseValue();
-    try std.testing.expectEqual(TOMLValue{ .integer = 0xDEADBEEF }, val);
-}
-
-test "parseValue: integer octal" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var parser = Parser.init(arena.allocator(), "0o755", .{});
-    const val = try parser.parseValue();
-    try std.testing.expectEqual(TOMLValue{ .integer = 0o755 }, val);
-}
-
-test "parseValue: integer binary" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var parser = Parser.init(arena.allocator(), "0b1010_1010", .{});
-    const val = try parser.parseValue();
-    try std.testing.expectEqual(TOMLValue{ .integer = 0b10101010 }, val);
-}
-
-test "parseValue: float decimal" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var parser = Parser.init(arena.allocator(), "3.14", .{});
-    const val = try parser.parseValue();
-    try std.testing.expectApproxEqAbs(@as(f64, 3.14), val.float, 1e-10);
-}
-
-test "parseValue: float exponent" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var parser = Parser.init(arena.allocator(), "3.14e-2", .{});
-    const val = try parser.parseValue();
-    try std.testing.expectApproxEqAbs(@as(f64, 3.14e-2), val.float, 1e-15);
-}
-
-test "parseValue: float inf and nan" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var p1 = Parser.init(arena.allocator(), "inf", .{});
-    const v1 = try p1.parseValue();
-    try std.testing.expect(std.math.isInf(v1.float) and v1.float > 0);
-    var p2 = Parser.init(arena.allocator(), "-inf", .{});
-    const v2 = try p2.parseValue();
-    try std.testing.expect(std.math.isInf(v2.float) and v2.float < 0);
-    var p3 = Parser.init(arena.allocator(), "nan", .{});
-    const v3 = try p3.parseValue();
-    try std.testing.expect(std.math.isNan(v3.float));
-}
-
-test "parseFromSlice: mixed types" {
+test "parse: success: string and number literals: string" {
     const input =
         \\str1 = "hello\nworld"
         \\str2 = 'C:\Users\tom'
         \\hex  = 0xDEADBEEF
+        \\oct  = 0o77
+        \\bin  = 0b1010
+        \\zero = 0
         \\flt  = 3.14e-2
+        \\flt2 = 1e10
     ;
-    var result = try parseFromSlice(std.testing.allocator, input, .{});
-    defer result.deinit();
-    const str1 = result.value.get("str1") orelse return error.TestFailed;
-    try std.testing.expectEqualStrings("hello\nworld", str1.string);
-    const str2 = result.value.get("str2") orelse return error.TestFailed;
-    try std.testing.expectEqualStrings("C:\\Users\\tom", str2.string);
-    const hex = result.value.get("hex") orelse return error.TestFailed;
-    try std.testing.expectEqual(@as(i64, 0xDEADBEEF), hex.integer);
-    const flt = result.value.get("flt") orelse return error.TestFailed;
-    try std.testing.expectApproxEqAbs(@as(f64, 3.14e-2), flt.float, 1e-15);
+    const test_cases = [_]struct {
+        name: []const u8,
+        input: []const u8,
+        expected: []const u8,
+    }{
+        .{ .name = "str1", .input = "str1", .expected = "hello\nworld" },
+        .{ .name = "str2", .input = "str2", .expected = "C:\\Users\\tom" },
+    };
+
+    for (test_cases) |tc| {
+        errdefer std.debug.print("FAIL: {s}\n", .{tc.name});
+
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const table = try parse(&arena, input, .{});
+        const val_opt = table.get(tc.input);
+        // どのテストケースが失敗したか特定するため
+        // expect で null チェックし、.? で安全に unwrap する
+        try std.testing.expect(val_opt != null);
+        try std.testing.expectEqualStrings(tc.expected, val_opt.?.string);
+    }
 }
 
-test "parseFromSlice: error invalid underscore" {
-    try std.testing.expectError(
-        error.InvalidNumber,
-        parseFromSlice(std.testing.allocator, "n = 1__0", .{}),
-    );
+test "parse: success: string and number literals: integer" {
+    const input =
+        \\str1 = "hello\nworld"
+        \\str2 = 'C:\Users\tom'
+        \\hex  = 0xDEADBEEF
+        \\oct  = 0o77
+        \\bin  = 0b1010
+        \\zero = 0
+        \\flt  = 3.14e-2
+        \\flt2 = 1e10
+    ;
+    const test_cases = [_]struct {
+        name: []const u8,
+        input: []const u8,
+        expected: i64,
+    }{
+        .{ .name = "hex", .input = "hex", .expected = 0xDEADBEEF },
+        .{ .name = "oct", .input = "oct", .expected = 63 },
+        .{ .name = "bin", .input = "bin", .expected = 10 },
+        .{ .name = "zero", .input = "zero", .expected = 0 },
+    };
+
+    for (test_cases) |tc| {
+        errdefer std.debug.print("FAIL: {s}\n", .{tc.name});
+
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const table = try parse(&arena, input, .{});
+        const val_opt = table.get(tc.input);
+        // どのテストケースが失敗したか特定するため
+        // expect で null チェックし、.? で安全に unwrap する
+        try std.testing.expect(val_opt != null);
+        try std.testing.expectEqual(tc.expected, val_opt.?.integer);
+    }
 }
 
-// ============================================================
+test "parse: success: string and number literals: float" {
+    const input =
+        \\str1 = "hello\nworld"
+        \\str2 = 'C:\Users\tom'
+        \\hex  = 0xDEADBEEF
+        \\oct  = 0o77
+        \\bin  = 0b1010
+        \\zero = 0
+        \\flt  = 3.14e-2
+        \\flt2 = 1e10
+    ;
+    const test_cases = [_]struct {
+        name: []const u8,
+        input: []const u8,
+        expected: struct { value: f64, tolerance: f64 },
+    }{
+        .{ .name = "flt", .input = "flt", .expected = .{ .value = 3.14e-2, .tolerance = 1e-15 } },
+        .{ .name = "flt2", .input = "flt2", .expected = .{ .value = 1e10, .tolerance = 1.0 } },
+    };
 
-test "parseValue: array" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var parser = Parser.init(arena.allocator(), "[1, 2, 3]", .{});
-    const val = try parser.parseValue();
-    try std.testing.expectEqual(@as(usize, 3), val.array.len);
-    try std.testing.expectEqual(@as(i64, 1), val.array[0].integer);
-    try std.testing.expectEqual(@as(i64, 3), val.array[2].integer);
+    for (test_cases) |tc| {
+        errdefer std.debug.print("FAIL: {s}\n", .{tc.name});
+
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const table = try parse(&arena, input, .{});
+        const val_opt = table.get(tc.input);
+        // どのテストケースが失敗したか特定するため
+        // expect で null チェックし、.? で安全に unwrap する
+        try std.testing.expect(val_opt != null);
+        try std.testing.expectApproxEqAbs(
+            tc.expected.value,
+            val_opt.?.float,
+            tc.expected.tolerance,
+        );
+    }
 }
 
-test "parseValue: nested array" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var parser = Parser.init(arena.allocator(), "[[1, 2], [3, 4]]", .{});
-    const val = try parser.parseValue();
-    try std.testing.expectEqual(@as(usize, 2), val.array.len);
-    try std.testing.expectEqual(@as(i64, 1), val.array[0].array[0].integer);
-    try std.testing.expectEqual(@as(i64, 4), val.array[1].array[1].integer);
+test "parse: success: multi-line strings" {
+    const test_cases = [_]struct {
+        name: []const u8,
+        input: struct { src: []const u8, key: []const u8 },
+        expected: []const u8,
+    }{
+        .{
+            .name = "multi-line basic string trims leading newline",
+            .input = .{
+                .src = "str = \"\"\"\nhello\nworld\"\"\"",
+                .key = "str",
+            },
+            .expected = "hello\nworld",
+        },
+        .{
+            .name = "multi-line literal string trims leading newline",
+            .input = .{
+                .src = "str = '''\nhello\nworld'''",
+                .key = "str",
+            },
+            .expected = "hello\nworld",
+        },
+    };
+
+    for (test_cases) |tc| {
+        errdefer std.debug.print("FAIL: {s}\n", .{tc.name});
+
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const table = try parse(&arena, tc.input.src, .{});
+        const val_opt = table.get(tc.input.key);
+        // どのテストケースが失敗したか特定するため
+        // expect で null チェックし、.? で安全に unwrap する
+        try std.testing.expect(val_opt != null);
+        try std.testing.expectEqualStrings(tc.expected, val_opt.?.string);
+    }
 }
 
-test "parseValue: array trailing comma" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var parser = Parser.init(arena.allocator(), "[\"apple\", \"banana\",]", .{});
-    const val = try parser.parseValue();
-    try std.testing.expectEqual(@as(usize, 2), val.array.len);
-    try std.testing.expectEqualStrings("apple", val.array[0].string);
+test "parse: success: unicode escape in string" {
+    const test_cases = [_]struct {
+        name: []const u8,
+        input: struct { src: []const u8, key: []const u8 },
+        expected: []const u8,
+    }{
+        .{
+            .name = "4-digit unicode escape",
+            .input = .{
+                .src = "s = \"\\u00E9\"",
+                .key = "s",
+            },
+            .expected = "é",
+        },
+        .{
+            .name = "8-digit unicode escape",
+            .input = .{
+                .src = "s = \"\\U0001F600\"",
+                .key = "s",
+            },
+            .expected = "😀",
+        },
+        .{
+            .name = "2-digit hex escape",
+            .input = .{
+                .src = "s = \"\\x41\"",
+                .key = "s",
+            },
+            .expected = "A",
+        },
+        .{
+            .name = "ESC escape",
+            .input = .{
+                .src = "s = \"\\e\"",
+                .key = "s",
+            },
+            .expected = "\x1b",
+        },
+    };
+
+    for (test_cases) |tc| {
+        errdefer std.debug.print("FAIL: {s}\n", .{tc.name});
+
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const table = try parse(&arena, tc.input.src, .{});
+        const val_opt = table.get(tc.input.key);
+        // どのテストケースが失敗したか特定するため
+        // expect で null チェックし、.? で安全に unwrap する
+        try std.testing.expect(val_opt != null);
+        try std.testing.expectEqualStrings(tc.expected, val_opt.?.string);
+    }
 }
 
-test "parseValue: inline table" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var parser = Parser.init(arena.allocator(), "{x = 1, y = 2}", .{});
-    const val = try parser.parseValue();
-    try std.testing.expectEqual(@as(i64, 1), val.table.get("x").?.integer);
-    try std.testing.expectEqual(@as(i64, 2), val.table.get("y").?.integer);
-}
-
-test "parseFromSlice: table header" {
+test "parse: success: table section" {
     const input =
         \\[database]
         \\host = "localhost"
         \\port = 5432
     ;
-    var result = try parseFromSlice(std.testing.allocator, input, .{});
-    defer result.deinit();
-
-    const db = result.value.get("database") orelse return error.TestFailed;
-    try std.testing.expectEqualStrings("localhost", db.table.get("host").?.string);
-    try std.testing.expectEqual(@as(i64, 5432), db.table.get("port").?.integer);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const table = try parse(&arena, input, .{});
+    const db = table.get("database") orelse return error.TestFailed;
+    const host = db.table.get("host") orelse return error.TestFailed;
+    try std.testing.expectEqualStrings("localhost", host.string);
+    const port = db.table.get("port") orelse return error.TestFailed;
+    try std.testing.expectEqual(@as(i64, 5432), port.integer);
 }
 
-test "parseFromSlice: dotted key" {
-    const input = "a.b.c = true\n";
-    var result = try parseFromSlice(std.testing.allocator, input, .{});
-    defer result.deinit();
-
-    const a = result.value.get("a") orelse return error.TestFailed;
+test "parse: success: dotted key" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const table = try parse(&arena, "a.b.c = true\n", .{});
+    const a = table.get("a") orelse return error.TestFailed;
     const b = a.table.get("b") orelse return error.TestFailed;
-    try std.testing.expectEqual(true, b.table.get("c").?.boolean);
+    const c = b.table.get("c") orelse return error.TestFailed;
+    try std.testing.expectEqual(true, c.boolean);
 }
 
-test "parseFromSlice: quoted key" {
-    const input = "\"my-key\" = 42\n";
-    var result = try parseFromSlice(std.testing.allocator, input, .{});
-    defer result.deinit();
-    try std.testing.expectEqual(@as(i64, 42), result.value.get("my-key").?.integer);
-}
-
-test "parseFromSlice: tables and arrays mixed" {
+test "parse: success: array inline table and table section" {
     const input =
         \\fruits = ["apple", "banana"]
         \\point = {x = 1, y = 2}
@@ -1383,109 +366,61 @@ test "parseFromSlice: tables and arrays mixed" {
         \\host = "localhost"
         \\port = 5432
     ;
-    var result = try parseFromSlice(std.testing.allocator, input, .{});
-    defer result.deinit();
-
-    const fruits = result.value.get("fruits") orelse return error.TestFailed;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const table = try parse(&arena, input, .{});
+    const fruits = table.get("fruits") orelse return error.TestFailed;
     try std.testing.expectEqual(@as(usize, 2), fruits.array.len);
     try std.testing.expectEqualStrings("apple", fruits.array[0].string);
-
-    const point = result.value.get("point") orelse return error.TestFailed;
-    try std.testing.expectEqual(@as(i64, 1), point.table.get("x").?.integer);
-
-    const db = result.value.get("database") orelse return error.TestFailed;
-    try std.testing.expectEqualStrings("localhost", db.table.get("host").?.string);
+    const point = table.get("point") orelse return error.TestFailed;
+    const px = point.table.get("x") orelse return error.TestFailed;
+    try std.testing.expectEqual(@as(i64, 1), px.integer);
+    const db = table.get("database") orelse return error.TestFailed;
+    const db_host = db.table.get("host") orelse return error.TestFailed;
+    try std.testing.expectEqualStrings("localhost", db_host.string);
 }
 
-test "parseFromSlice: duplicate table header error" {
-    try std.testing.expectError(
-        error.DuplicateKey,
-        parseFromSlice(std.testing.allocator, "[a]\n[a]\n", .{}),
-    );
-}
-
-test "parseFromSlice: duplicate dotted key error" {
-    try std.testing.expectError(
-        error.DuplicateKey,
-        parseFromSlice(std.testing.allocator, "a.b = 1\na.b = 2\n", .{}),
-    );
-}
-
-// ============================================================
-
-test "parseValue: local date" {
+test "parse: success: empty array and inline table" {
+    const input =
+        \\arr = []
+        \\tbl = {}
+    ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var parser = Parser.init(arena.allocator(), "1979-05-27", .{});
-    const val = try parser.parseValue();
-    const d = val.local_date;
-    try std.testing.expectEqual(@as(u16, 1979), d.year);
-    try std.testing.expectEqual(@as(u8, 5), d.month);
-    try std.testing.expectEqual(@as(u8, 27), d.day);
+    const table = try parse(&arena, input, .{});
+    const arr = table.get("arr") orelse return error.TestFailed;
+    try std.testing.expectEqual(@as(usize, 0), arr.array.len);
+    const tbl = table.get("tbl") orelse return error.TestFailed;
+    try std.testing.expectEqual(@as(usize, 0), tbl.table.count());
 }
 
-test "parseValue: local time" {
+test "parse: success: nested array" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var parser = Parser.init(arena.allocator(), "07:32:00", .{});
-    const val = try parser.parseValue();
-    const t = val.local_time;
-    try std.testing.expectEqual(@as(u8, 7), t.hour);
-    try std.testing.expectEqual(@as(u8, 32), t.minute);
-    try std.testing.expectEqual(@as(u8, 0), t.second);
+    const table = try parse(&arena, "arr = [[1, 2], [3, 4]]\n", .{});
+    const arr = table.get("arr") orelse return error.TestFailed;
+    try std.testing.expectEqual(@as(usize, 2), arr.array.len);
+    try std.testing.expectEqual(@as(i64, 2), arr.array[0].array[1].integer);
+    try std.testing.expectEqual(@as(i64, 3), arr.array[1].array[0].integer);
 }
 
-test "parseValue: local time with fractional seconds" {
+test "parse: success: max nesting depth" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var parser = Parser.init(arena.allocator(), "07:32:00.999999", .{});
-    const val = try parser.parseValue();
-    try std.testing.expect(val.local_time.nanosecond > 0);
+    const table = try parse(&arena, "n = " ++ "[" ** 128 ++ "1" ++ "]" ** 128, .{});
+    const n = table.get("n") orelse return error.TestFailed;
+    try std.testing.expectEqual(@as(usize, 1), n.array.len);
 }
 
-test "parseValue: local datetime" {
+test "parse: success: max nesting depth for inline table" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var parser = Parser.init(arena.allocator(), "1979-05-27T07:32:00", .{});
-    const val = try parser.parseValue();
-    const dt = val.local_date_time;
-    try std.testing.expectEqual(@as(u16, 1979), dt.date.year);
-    try std.testing.expectEqual(@as(u8, 7), dt.time.hour);
+    const table = try parse(&arena, "n = " ++ "{k = " ** 128 ++ "1" ++ "}" ** 128, .{});
+    const n = table.get("n") orelse return error.TestFailed;
+    try std.testing.expectEqual(@as(usize, 1), n.table.count());
 }
 
-test "parseValue: offset datetime UTC" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var parser = Parser.init(arena.allocator(), "1979-05-27T07:32:00Z", .{});
-    const val = try parser.parseValue();
-    const odt = val.offset_date_time;
-    try std.testing.expectEqual(@as(i16, 0), odt.offset_minutes);
-    try std.testing.expectEqual(@as(u16, 1979), odt.datetime.date.year);
-}
-
-test "parseValue: offset datetime with offset" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var parser = Parser.init(arena.allocator(), "1979-05-27T07:32:00+09:00", .{});
-    const val = try parser.parseValue();
-    try std.testing.expectEqual(@as(i16, 9 * 60), val.offset_date_time.offset_minutes);
-}
-
-test "parseValue: invalid date month" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var parser = Parser.init(arena.allocator(), "1979-13-01", .{});
-    try std.testing.expectError(error.InvalidDate, parser.parseValue());
-}
-
-test "parseValue: invalid time hour" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var parser = Parser.init(arena.allocator(), "25:00:00", .{});
-    try std.testing.expectError(error.InvalidTime, parser.parseValue());
-}
-
-test "parseFromSlice: array of tables" {
+test "parse: success: array of tables" {
     const input =
         \\[[products]]
         \\name = "Hammer"
@@ -1493,30 +428,501 @@ test "parseFromSlice: array of tables" {
         \\[[products]]
         \\name = "Nail"
     ;
-    var result = try parseFromSlice(std.testing.allocator, input, .{});
-    defer result.deinit();
-
-    const products = result.value.get("products") orelse return error.TestFailed;
-    try std.testing.expectEqual(@as(usize, 2), products.array.len);
-    try std.testing.expectEqualStrings("Hammer", products.array[0].table.get("name").?.string);
-    try std.testing.expectEqualStrings("Nail", products.array[1].table.get("name").?.string);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const table = try parse(&arena, input, .{});
+    const products = table.get("products") orelse return error.TestFailed;
+    try std.testing.expectEqual(@as(usize, 2), products.aot_array.len());
+    const name0 = products.aot_array.items()[0].table.get("name") orelse return error.TestFailed;
+    try std.testing.expectEqualStrings("Hammer", name0.string);
+    const name1 = products.aot_array.items()[1].table.get("name") orelse return error.TestFailed;
+    try std.testing.expectEqualStrings("Nail", name1.string);
 }
 
-test "parseFromSlice: datetime values in document" {
+test "parse: success: datetime types" {
     const input =
-        \\dt = 1979-05-27T07:32:00Z
-        \\d  = 1979-05-27
-        \\t  = 07:32:00
+        \\dt     = 1979-05-27T07:32:00Z
+        \\dt_jst = 1979-05-27T07:32:00+09:00
+        \\dt_est = 1979-05-27T07:32:00-05:00
+        \\dt_ns  = 1979-05-27T07:32:00.123456789Z
+        \\d      = 1979-05-27
+        \\t      = 07:32:00
     ;
-    var result = try parseFromSlice(std.testing.allocator, input, .{});
-    defer result.deinit();
-
-    const dt = result.value.get("dt") orelse return error.TestFailed;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const table = try parse(&arena, input, .{});
+    const dt = table.get("dt") orelse return error.TestFailed;
     try std.testing.expectEqual(@as(i16, 0), dt.offset_date_time.offset_minutes);
-
-    const d = result.value.get("d") orelse return error.TestFailed;
+    const dt_jst = table.get("dt_jst") orelse return error.TestFailed;
+    try std.testing.expectEqual(@as(i16, 540), dt_jst.offset_date_time.offset_minutes);
+    const dt_est = table.get("dt_est") orelse return error.TestFailed;
+    try std.testing.expectEqual(@as(i16, -300), dt_est.offset_date_time.offset_minutes);
+    const dt_ns = table.get("dt_ns") orelse return error.TestFailed;
+    try std.testing.expectEqual(
+        @as(u32, 123_456_789),
+        dt_ns.offset_date_time.datetime.time.nanosecond,
+    );
+    const d = table.get("d") orelse return error.TestFailed;
     try std.testing.expectEqual(@as(u8, 27), d.local_date.day);
-
-    const t = result.value.get("t") orelse return error.TestFailed;
+    const t = table.get("t") orelse return error.TestFailed;
     try std.testing.expectEqual(@as(u8, 7), t.local_time.hour);
+}
+
+test "parse: success: local datetime" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const table = try parse(&arena, "dt = 1979-05-27T07:32:00\n", .{});
+    const dt = table.get("dt") orelse return error.TestFailed;
+    try std.testing.expectEqual(@as(u16, 1979), dt.local_date_time.date.year);
+    try std.testing.expectEqual(@as(u8, 5), dt.local_date_time.date.month);
+    try std.testing.expectEqual(@as(u8, 27), dt.local_date_time.date.day);
+    try std.testing.expectEqual(@as(u8, 7), dt.local_date_time.time.hour);
+    try std.testing.expectEqual(@as(u8, 32), dt.local_date_time.time.minute);
+    try std.testing.expectEqual(@as(u8, 0), dt.local_date_time.time.second);
+}
+
+test "parse: success: line ending variants" {
+    const test_cases = [_]struct {
+        name: []const u8,
+        input: []const u8,
+        expected: struct { a: i64, b: i64 },
+    }{
+        .{
+            .name = "CRLF",
+            .input = "a = 1\r\nb = 2\r\n",
+            .expected = .{ .a = 1, .b = 2 },
+        },
+        .{
+            .name = "mixed LF and CRLF",
+            .input = "a = 1\nb = 2\r\n",
+            .expected = .{ .a = 1, .b = 2 },
+        },
+    };
+
+    for (test_cases) |tc| {
+        errdefer std.debug.print("FAIL: {s}\n", .{tc.name});
+
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const table = try parse(&arena, tc.input, .{});
+        const a_opt = table.get("a");
+        // どのテストケースが失敗したか特定するため
+        // expect で null チェックし、.? で安全に unwrap する
+        try std.testing.expect(a_opt != null);
+        try std.testing.expectEqual(tc.expected.a, a_opt.?.integer);
+        const b_opt = table.get("b");
+        try std.testing.expect(b_opt != null);
+        try std.testing.expectEqual(tc.expected.b, b_opt.?.integer);
+    }
+}
+
+test "parse: success: empty input" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const table = try parse(&arena, "", .{});
+    try std.testing.expectEqual(@as(usize, 0), table.count());
+}
+
+test "parse: success: dotted table header" {
+    const input =
+        \\[a.b]
+        \\val = 1
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const table = try parse(&arena, input, .{});
+    const a = table.get("a") orelse return error.TestFailed;
+    const b = a.table.get("b") orelse return error.TestFailed;
+    const val = b.table.get("val") orelse return error.TestFailed;
+    try std.testing.expectEqual(@as(i64, 1), val.integer);
+}
+
+test "parse: success: nan and inf" {
+    const input =
+        \\a = nan
+        \\b = -inf
+        \\c = +nan
+        \\d = -nan
+        \\e = +inf
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const table = try parse(&arena, input, .{});
+    const a = table.get("a") orelse return error.TestFailed;
+    try std.testing.expect(std.math.isNan(a.float));
+    const b = table.get("b") orelse return error.TestFailed;
+    try std.testing.expectEqual(-std.math.inf(f64), b.float);
+    const c = table.get("c") orelse return error.TestFailed;
+    try std.testing.expect(std.math.isNan(c.float));
+    const d = table.get("d") orelse return error.TestFailed;
+    try std.testing.expect(std.math.isNan(d.float));
+    const e = table.get("e") orelse return error.TestFailed;
+    try std.testing.expectEqual(std.math.inf(f64), e.float);
+}
+
+test "parse: success: integer boundary values" {
+    const input =
+        \\max = 9223372036854775807
+        \\min = -9223372036854775808
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const table = try parse(&arena, input, .{});
+    const max_val = table.get("max") orelse return error.TestFailed;
+    try std.testing.expectEqual(std.math.maxInt(i64), max_val.integer);
+    const min_val = table.get("min") orelse return error.TestFailed;
+    try std.testing.expectEqual(std.math.minInt(i64), min_val.integer);
+}
+
+test "parse: success: nested array of tables" {
+    const input =
+        \\[[fruits.variety]]
+        \\name = "red delicious"
+        \\
+        \\[[fruits.variety]]
+        \\name = "granny smith"
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const table = try parse(&arena, input, .{});
+    const fruits = table.get("fruits") orelse return error.TestFailed;
+    const variety = fruits.table.get("variety") orelse return error.TestFailed;
+    try std.testing.expectEqual(@as(usize, 2), variety.aot_array.len());
+    const name0 = variety.aot_array.items()[0].table.get("name") orelse return error.TestFailed;
+    try std.testing.expectEqualStrings("red delicious", name0.string);
+    const name1 = variety.aot_array.items()[1].table.get("name") orelse return error.TestFailed;
+    try std.testing.expectEqualStrings("granny smith", name1.string);
+}
+
+test "parse: success: sub-table of array of tables" {
+    const input =
+        \\[[fruits]]
+        \\name = "apple"
+        \\
+        \\[fruits.physical]
+        \\color = "red"
+        \\shape = "round"
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const table = try parse(&arena, input, .{});
+    const fruits = table.get("fruits") orelse return error.TestFailed;
+    try std.testing.expectEqual(@as(usize, 1), fruits.aot_array.len());
+    const elem = fruits.aot_array.items()[0];
+    const name = elem.table.get("name") orelse return error.TestFailed;
+    try std.testing.expectEqualStrings("apple", name.string);
+    const physical = elem.table.get("physical") orelse return error.TestFailed;
+    const color = physical.table.get("color") orelse return error.TestFailed;
+    try std.testing.expectEqualStrings("red", color.string);
+    const shape = physical.table.get("shape") orelse return error.TestFailed;
+    try std.testing.expectEqualStrings("round", shape.string);
+}
+
+test "parse: error" {
+    const test_cases = [_]struct {
+        name: []const u8,
+        input: []const u8,
+        expected: errors.ParseError,
+    }{
+        .{
+            .name = "missing value",
+            .input = "key = ",
+            .expected = error.UnexpectedEof,
+        },
+        .{
+            .name = "unquoted string value",
+            .input = "key = value",
+            .expected = error.UnexpectedChar,
+        },
+        .{
+            .name = "duplicate key",
+            .input = "a = 1\na = 2",
+            .expected = error.DuplicateKey,
+        },
+        .{
+            .name = "invalid underscore",
+            .input = "n = 1__0",
+            .expected = error.InvalidNumber,
+        },
+        .{
+            .name = "binary with invalid digit",
+            .input = "n = 0b12",
+            .expected = error.InvalidNumber,
+        },
+        .{
+            .name = "octal with invalid digit",
+            .input = "n = 0o89",
+            .expected = error.InvalidNumber,
+        },
+        .{
+            .name = "integer with leading zero",
+            .input = "n = 01",
+            .expected = error.InvalidNumber,
+        },
+        .{
+            .name = "signed hex",
+            .input = "n = +0xFF",
+            .expected = error.InvalidNumber,
+        },
+        .{
+            .name = "signed octal",
+            .input = "n = -0o77",
+            .expected = error.InvalidNumber,
+        },
+        .{
+            .name = "signed binary",
+            .input = "n = +0b101",
+            .expected = error.InvalidNumber,
+        },
+        .{
+            .name = "float leading zero in integer part",
+            .input = "n = 01.5",
+            .expected = error.InvalidNumber,
+        },
+        .{
+            .name = "float trailing underscore in integer part",
+            .input = "n = 1_.5",
+            .expected = error.InvalidNumber,
+        },
+        .{
+            .name = "float trailing underscore in fractional part",
+            .input = "n = 1.5_",
+            .expected = error.InvalidNumber,
+        },
+        .{
+            .name = "float leading underscore in exponent",
+            .input = "n = 1e_0",
+            .expected = error.InvalidNumber,
+        },
+        .{
+            .name = "float trailing underscore in exponent",
+            .input = "n = 1e1_",
+            .expected = error.InvalidNumber,
+        },
+        .{
+            .name = "duplicate table header",
+            .input = "[a]\n[a]\n",
+            .expected = error.DuplicateKey,
+        },
+        .{
+            .name = "duplicate dotted key",
+            .input = "a.b = 1\na.b = 2\n",
+            .expected = error.DuplicateKey,
+        },
+        .{
+            .name = "AoT key conflicts with existing scalar",
+            .input = "a = 1\n[[a]]\n",
+            .expected = error.DuplicateKey,
+        },
+        .{
+            .name = "integer literal exceeding buffer",
+            .input = "n = " ++ "9" ++ "_2" ** 32,
+            .expected = error.InvalidNumber,
+        },
+        .{
+            .name = "binary literal exceeding buffer",
+            .input = "n = 0b" ++ "0" ++ "_1" ** 64,
+            .expected = error.InvalidNumber,
+        },
+        .{
+            .name = "invalid escape sequence",
+            .input = "key = \"\\q\"",
+            .expected = error.InvalidEscape,
+        },
+        .{
+            .name = "invalid unicode code point",
+            .input = "key = \"\\uD800\"",
+            .expected = error.InvalidUnicode,
+        },
+        .{
+            .name = "invalid hex digit in 2-digit escape",
+            .input = "key = \"\\xGG\"",
+            .expected = error.InvalidUnicode,
+        },
+        .{
+            .name = "invalid date month out of range",
+            .input = "d = 1979-13-01",
+            .expected = error.InvalidDate,
+        },
+        .{
+            .name = "invalid time minute out of range",
+            .input = "t = 07:60:00",
+            .expected = error.InvalidTime,
+        },
+        .{
+            .name = "deeply nested array",
+            .input = "n = " ++ "[" ** 129 ++ "1" ++ "]" ** 129,
+            .expected = error.MaxDepthExceeded,
+        },
+        .{
+            .name = "deeply nested inline table",
+            .input = "n = " ++ "{k = " ** 129 ++ "1" ++ "}" ** 129,
+            .expected = error.MaxDepthExceeded,
+        },
+        .{
+            .name = "integer overflow",
+            .input = "n = 9223372036854775808",
+            .expected = error.InvalidNumber,
+        },
+        .{
+            .name = "trailing comma in inline table",
+            .input = "n = {x = 1,}",
+            .expected = error.UnexpectedChar,
+        },
+        .{
+            .name = "array of tables path through inline table",
+            .input = "a = {b = {c = 1}}\n[[a.b.d]]\n",
+            .expected = error.DuplicateKey,
+        },
+    };
+
+    for (test_cases) |tc| {
+        errdefer std.debug.print("FAIL: {s}\n", .{tc.name});
+
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        try std.testing.expectError(
+            tc.expected,
+            parse(&arena, tc.input, .{}),
+        );
+    }
+}
+
+test "parse: diagnostic" {
+    const test_cases = [_]struct {
+        name: []const u8,
+        input: []const u8,
+        expected: struct {
+            err: errors.ParseError,
+            line: usize,
+            column: usize,
+            message: []const u8,
+        },
+    }{
+        .{
+            .name = "missing value",
+            .input = "key = ",
+            .expected = .{
+                .err = error.UnexpectedEof,
+                .line = 1,
+                .column = 7,
+                .message = "unexpected end of input",
+            },
+        },
+        .{
+            .name = "unicode column counting",
+            .input = "café = ",
+            .expected = .{
+                .err = error.UnexpectedEof,
+                .line = 1,
+                .column = 8,
+                .message = "unexpected end of input",
+            },
+        },
+        .{
+            .name = "AoT key conflicts with existing scalar",
+            .input = "a = 1\n[[a]]\n",
+            .expected = .{
+                .err = error.DuplicateKey,
+                .line = 2,
+                .column = 6,
+                .message = "array table key conflicts with existing key",
+            },
+        },
+        .{
+            .name = "invalid escape sequence",
+            .input = "key = \"\\q\"",
+            .expected = .{
+                .err = error.InvalidEscape,
+                .line = 1,
+                .column = 10,
+                .message = "invalid escape sequence",
+            },
+        },
+        .{
+            .name = "invalid date month",
+            .input = "d = 1979-13-01",
+            .expected = .{
+                .err = error.InvalidDate,
+                .line = 1,
+                .column = 12,
+                .message = "invalid month",
+            },
+        },
+        .{
+            .name = "invalid time minute",
+            .input = "t = 07:60:00",
+            .expected = .{
+                .err = error.InvalidTime,
+                .line = 1,
+                .column = 10,
+                .message = "invalid minute",
+            },
+        },
+        .{
+            .name = "integer with leading zero",
+            .input = "n = 01",
+            .expected = .{
+                .err = error.InvalidNumber,
+                .line = 1,
+                .column = 7,
+                .message = "leading zero in number",
+            },
+        },
+        .{
+            .name = "invalid unicode code point",
+            .input = "key = \"\\uD800\"",
+            .expected = .{
+                .err = error.InvalidUnicode,
+                .line = 1,
+                .column = 14,
+                .message = "invalid unicode code point",
+            },
+        },
+        .{
+            .name = "unexpected character in value",
+            .input = "key = value",
+            .expected = .{
+                .err = error.UnexpectedChar,
+                .line = 1,
+                .column = 7,
+                .message = "unexpected character in value",
+            },
+        },
+        .{
+            .name = "deeply nested array",
+            .input = "n = " ++ "[" ** 129 ++ "1" ++ "]" ** 129,
+            .expected = .{
+                .err = error.MaxDepthExceeded,
+                .line = 1,
+                .column = 133,
+                .message = "nesting depth exceeded",
+            },
+        },
+        .{
+            .name = "deeply nested inline table",
+            .input = "n = " ++ "{k = " ** 129 ++ "1" ++ "}" ** 129,
+            .expected = .{
+                .err = error.MaxDepthExceeded,
+                .line = 1,
+                .column = 645,
+                .message = "nesting depth exceeded",
+            },
+        },
+    };
+
+    for (test_cases) |tc| {
+        errdefer std.debug.print("FAIL: {s}\n", .{tc.name});
+
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var diagnostic = Diagnostic{};
+        try std.testing.expectError(
+            tc.expected.err,
+            parse(&arena, tc.input, .{ .diagnostic = &diagnostic }),
+        );
+        try std.testing.expectEqual(tc.expected.line, diagnostic.line);
+        try std.testing.expectEqual(tc.expected.column, diagnostic.column);
+        try std.testing.expectEqualStrings(tc.expected.message, diagnostic.message);
+    }
 }

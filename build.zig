@@ -5,7 +5,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const mod = b.addModule("ztoml", .{
-        .root_source_file = b.path("src/root.zig"),
+        .root_source_file = b.path("src/ztoml.zig"),
         .target = target,
     });
 
@@ -23,14 +23,14 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 
-    const run_step = b.step("run", "Run the app");
+    const example_basic_step = b.step("example-basic", "Run examples/basic.zig");
 
-    const run_exe = b.addRunArtifact(exe);
-    run_step.dependOn(&run_exe.step);
-    run_exe.step.dependOn(b.getInstallStep());
+    const exe_example_basic = b.addRunArtifact(exe);
+    example_basic_step.dependOn(&exe_example_basic.step);
+    exe_example_basic.step.dependOn(b.getInstallStep());
 
     if (b.args) |args| {
-        run_exe.addArgs(args);
+        exe_example_basic.addArgs(args);
     }
 
     const mod_tests = b.addTest(.{
